@@ -81,9 +81,13 @@ async function analyzeWithCursor(
 
     if (stream) {
       let accumulated = "";
+      const statusMessages: string[] = [];
       for await (const message of run.stream()) {
         const update = streamMessageToText(message);
-        if (update.status) stream.onStatus?.(update.status);
+        if (update.status) {
+          statusMessages.push(update.status);
+          stream.onStatus?.(update.status);
+        }
         if (update.text) {
           const delta = extractStreamDelta(accumulated, update.text);
           accumulated += delta;
@@ -93,7 +97,7 @@ async function analyzeWithCursor(
 
       const result = await run.wait();
       if (result.status !== "finished") {
-        throw new Error(`Agent 分析未完成，状态：${result.status}`);
+        throw new Error(formatRunFailure(result.status, statusMessages));
       }
       const finalText = result.result?.trim() || accumulated.trim() || "Agent 未返回分析内容。";
       const finalDelta = finalText.startsWith(accumulated) ? finalText.slice(accumulated.length) : "";
@@ -103,7 +107,7 @@ async function analyzeWithCursor(
 
     const result = await run.wait();
     if (result.status !== "finished") {
-      throw new Error(`Agent 分析未完成，状态：${result.status}`);
+      throw new Error(formatRunFailure(result.status));
     }
     return result.result?.trim() || "Agent 未返回分析内容。";
   } finally {
@@ -191,6 +195,14 @@ function extractStreamDelta(accumulated: string, incoming: string): string {
   return incoming;
 }
 
+function formatRunFailure(status: string, statusMessages: string[] = []): string {
+  const details = [...new Set(statusMessages.map((message) => message.trim()).filter(Boolean))]
+    .filter((message) => !message.includes("正在") && !message.includes("会话已"))
+    .slice(-3)
+    .join("；");
+  return details ? `Agent 分析未完成，状态：${status}。${details}` : `Agent 分析未完成，状态：${status}`;
+}
+
 function buildCursorPrompt(
   question: string,
   analysisType: string,
@@ -201,7 +213,7 @@ function buildCursorPrompt(
   outputMode: OutputMode,
 ): string {
   const repoList = repos.map((repo) => `- ${repo.name}: ${repo.local_path} (${repo.branch})`).join("\n");
-  const logSection = logText.trim() ? `\n日志内容：\n${logText.slice(0, 12000)}\n` : "";
+  const logSection = logText.trim() ? `\n附件内容：\n${logText.slice(0, 12000)}\n` : "";
   const conversationSection = conversationContext.trim()
     ? `\n本轮对话上下文（用于理解“继续、上一轮、下一步、它、这个问题”等指代）：\n${conversationContext.slice(-12000)}\n`
     : "";

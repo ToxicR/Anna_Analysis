@@ -579,7 +579,6 @@ async function runAnalysis() {
   } catch (error) {
     renderMessageBody(pending.querySelector(".message-body"), `分析失败：${error.message || error}`);
     $("analysisResult").textContent = "分析失败";
-    throw error;
   } finally {
     $("runAnalysis").disabled = false;
   }
