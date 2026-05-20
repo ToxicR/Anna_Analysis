@@ -1,4 +1,5 @@
 import { Agent } from "@cursor/sdk";
+import { getSetting } from "../db.js";
 import type { AIModel, CodeChunk, GitRepo } from "../types.js";
 import { formatContext } from "./code.js";
 
@@ -24,19 +25,11 @@ export async function analyzeWithModel(
   logText: string,
   repos: GitRepo[],
 ): Promise<string> {
-  if (!model || !model.provider || !model.model_name) {
+  if (!model || !model.model_name) {
     return localAnalysis(question, analysisType, chunks, logText);
   }
 
-  if (model.provider === "cursor") {
-    return analyzeWithCursor(model, question, analysisType, chunks, logText, repos);
-  }
-
-  if (model.provider === "openai-compatible") {
-    return analyzeWithOpenAICompatible(model, question, analysisType, chunks, logText);
-  }
-
-  return localAnalysis(question, analysisType, chunks, logText);
+  return analyzeWithCursor(model, question, analysisType, chunks, logText, repos);
 }
 
 async function analyzeWithCursor(
@@ -51,9 +44,10 @@ async function analyzeWithCursor(
   if (!cwd.length) {
     throw new Error("未找到本地仓库路径，请先同步代码后再分析");
   }
+  const apiKey = getCursorApiKey(model);
 
   const agent = await Agent.create({
-    apiKey: model.api_key || undefined,
+    apiKey,
     model: { id: model.model_name },
     name: "Anna Analysis",
     local: {
@@ -74,53 +68,6 @@ async function analyzeWithCursor(
   } finally {
     agent.close();
   }
-}
-
-async function analyzeWithOpenAICompatible(
-  model: AIModel,
-  question: string,
-  analysisType: string,
-  chunks: CodeChunk[],
-  logText: string,
-): Promise<string> {
-  if (!model.base_url || !model.api_key) {
-    return localAnalysis(question, analysisType, chunks, logText);
-  }
-
-  let url = model.base_url.replace(/\/+$/, "");
-  if (!url.endsWith("/chat/completions")) {
-    url = `${url}/chat/completions`;
-  }
-
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${model.api_key}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: model.model_name,
-      messages: [
-        {
-          role: "system",
-          content: [
-            "你是资深研发代码分析助手。",
-            "日志是可选输入；没有日志时，直接基于代码上下文分析，不要要求用户上传日志。",
-            "如果代码上下文不足，说明缺少哪些代码线索，并给出可继续检索的关键词。",
-            "回答必须引用文件路径，区分事实和推测。",
-          ].join(""),
-        },
-        { role: "user", content: buildPrompt(question, analysisType, chunks, logText) },
-      ],
-      temperature: 0.2,
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`AI 模型调用失败：${response.status} ${await response.text()}`);
-  }
-  const data = await response.json() as { choices?: Array<{ message?: { content?: string } }> };
-  return data.choices?.[0]?.message?.content ?? "";
 }
 
 function buildCursorPrompt(
@@ -159,25 +106,9 @@ ${formatContext(chunks)}
 - 输出 Markdown，但避免复杂表格，优先使用清晰列表。`;
 }
 
-function buildPrompt(question: string, analysisType: string, chunks: CodeChunk[], logText: string): string {
-  const logSection = logText.trim() ? `\n日志内容：\n${logText.slice(0, 12000)}\n` : "";
-  return `分析类型：${analysisType}
-
-用户问题：${question}
-${logSection}
-检索到的代码上下文：
-${formatContext(chunks)}
-
-请输出：
-1. 结论摘要
-2. 相关代码文件和关键方法
-3. 实现流程或问题根因
-4. 事实依据和推测项
-5. 下一步排查/继续阅读建议
-
-注意：
-- 如果没有日志内容，不要提“缺少日志”，直接按代码分析。
-- 如果代码上下文没有命中，不要把原因归结为未上传日志。`;
+function getCursorApiKey(model: AIModel): string | undefined {
+  const key = process.env.CURSOR_API_KEY?.trim() || getSetting("cursor_api_key").trim() || model.api_key?.trim();
+  return key || undefined;
 }
 
 function localAnalysis(question: string, analysisType: string, chunks: CodeChunk[], logText: string): string {
@@ -206,7 +137,7 @@ function localAnalysis(question: string, analysisType: string, chunks: CodeChunk
   lines.push(
     "",
     "## 下一步建议",
-    "- 配置 provider 为 `cursor` 的模型后，可以让 Cursor Agent 直接在仓库目录中继续阅读代码并给出完整分析。",
+    "- 配置 Cursor 模型后，可以让 Cursor Agent 直接在仓库目录中继续阅读代码并给出完整分析。",
     "- 如果当前问题是功能实现分析，不需要上传日志；只有排查运行异常时才需要日志。",
   );
 

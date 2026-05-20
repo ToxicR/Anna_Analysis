@@ -123,7 +123,7 @@ function renderModels() {
   $("modelList").innerHTML = state.models.map((model) => `
     <div class="item">
       <strong>${escapeHtml(model.name)}${model.is_default ? "（默认）" : ""}</strong>
-      <small>${escapeHtml(model.provider)} · ${escapeHtml(model.model_name || "未填写模型 ID")}</small>
+      <small>Cursor · ${escapeHtml(model.model_name || "未填写模型 ID")}</small>
     </div>
   `).join("");
 }
@@ -248,20 +248,16 @@ async function saveGitlabToken() {
 
 async function saveModel() {
   await api("/api/models", {
-    method: "POST",
-    body: JSON.stringify({
-      name: $("modelName").value.trim(),
-      provider: $("modelProvider").value.trim() || "openai-compatible",
-      base_url: $("modelBaseUrl").value.trim(),
-      api_key: $("modelApiKey").value.trim(),
-      model_name: $("modelId").value.trim(),
-      is_default: $("modelDefault").checked,
-    }),
-  });
+      method: "POST",
+      body: JSON.stringify({
+        name: $("modelName").value.trim(),
+        provider: "cursor",
+        base_url: "",
+        model_name: $("modelId").value.trim(),
+        is_default: $("modelDefault").checked,
+      }),
+    });
   $("modelName").value = "";
-  $("modelProvider").value = "cursor";
-  $("modelBaseUrl").value = "";
-  $("modelApiKey").value = "";
   $("modelId").value = "";
   $("modelDefault").checked = false;
   await loadAll();

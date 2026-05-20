@@ -249,7 +249,7 @@ app.put("/api/settings/gitlab-token", async (request) => {
 });
 
 app.get("/api/models", async () => {
-  const rows = db.prepare("SELECT * FROM ai_models ORDER BY id DESC").all() as AIModel[];
+  const rows = db.prepare("SELECT * FROM ai_models WHERE provider = 'cursor' ORDER BY id DESC").all() as AIModel[];
   return normalizeRows(rows).map(publicModel);
 });
 
@@ -263,9 +263,9 @@ app.post("/api/models", async (request, reply) => {
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       payload.name.trim(),
-      payload.provider?.trim() || "cursor",
-      payload.base_url?.trim() ?? "",
-      payload.api_key?.trim() ?? "",
+      "cursor",
+      "",
+      "",
       payload.model_name?.trim() || "composer-2",
       boolToInt(payload.enabled),
       boolToInt(payload.is_default, false),
@@ -290,9 +290,9 @@ app.put("/api/models/:modelId", async (request, reply) => {
       WHERE id = ?
     `).run(
       payload.name.trim(),
-      payload.provider?.trim() || "cursor",
-      payload.base_url?.trim() ?? "",
-      payload.api_key?.trim() ?? "",
+      "cursor",
+      "",
+      "",
       payload.model_name?.trim() || "composer-2",
       boolToInt(payload.enabled),
       boolToInt(payload.is_default, false),
@@ -378,7 +378,7 @@ app.post("/api/analyze/stream", async (request, reply) => {
     const chunks = searchCode(repos.map((repo) => repo.id), `${question}\n${logText}`);
     const analysisType = payload.analysis_type || inferAnalysisType(question, logText);
 
-    send("status", { message: model?.provider === "cursor" ? "Cursor Agent 正在分析代码" : "AI 模型正在分析" });
+    send("status", { message: "Cursor Agent 正在分析代码" });
     const result = await analyzeWithModel(model, question, analysisType, chunks, logText, repos);
     const insertResult = db.prepare(`
       INSERT INTO analysis_tasks(project_id, model_id, analysis_type, question, log_text, selected_repo_ids, status, result, created_at)
@@ -444,12 +444,12 @@ function getReposByIds(repoIds: number[]): GitRepo[] {
 }
 
 function getModel(modelId: number): AIModel | undefined {
-  const row = db.prepare("SELECT * FROM ai_models WHERE id = ?").get(modelId) as AIModel | undefined;
+  const row = db.prepare("SELECT * FROM ai_models WHERE id = ? AND provider = 'cursor'").get(modelId) as AIModel | undefined;
   return row ? normalizeRow(row) : undefined;
 }
 
 function getDefaultModel(): AIModel | undefined {
-  const row = db.prepare("SELECT * FROM ai_models WHERE is_default = 1 AND enabled = 1 ORDER BY id DESC LIMIT 1").get() as AIModel | undefined;
+  const row = db.prepare("SELECT * FROM ai_models WHERE provider = 'cursor' AND is_default = 1 AND enabled = 1 ORDER BY id DESC LIMIT 1").get() as AIModel | undefined;
   return row ? normalizeRow(row) : undefined;
 }
 
@@ -457,11 +457,13 @@ function getTask(taskId: number): AnalysisTask | undefined {
   return db.prepare("SELECT * FROM analysis_tasks WHERE id = ?").get(taskId) as AnalysisTask | undefined;
 }
 
-function publicModel(model: AIModel): Omit<AIModel, "api_key"> & { api_key: string; configured: boolean } {
+function publicModel(model: AIModel): Omit<AIModel, "api_key" | "base_url"> & { api_key: string; base_url: string; configured: boolean } {
+  const configured = Boolean(process.env.CURSOR_API_KEY?.trim() || getSetting("cursor_api_key").trim() || model.api_key);
   return {
     ...model,
     api_key: "",
-    configured: Boolean(model.api_key),
+    base_url: "",
+    configured,
   };
 }
 

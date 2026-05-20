@@ -8,8 +8,7 @@
 - 一个项目可以只绑定一个仓库，也可以绑定两个仓库；分析时只使用选中的仓库。
 - GitLab 访问 Token 使用全局配置。
 - 发送分析前可自动同步仓库并建立本地代码索引。
-- 支持 `cursor` provider，通过 Cursor SDK 让 Agent 在本地仓库目录中分析代码。
-- 兼容 `openai-compatible` provider，保留原有模型调用方式。
+- 仅支持 Cursor SDK，通过 Cursor Agent 在本地仓库目录中分析代码。
 - 支持上传日志；未上传日志时直接按代码分析。
 - 保存分析历史，并支持删除和清空。
 - 提供基础 SSE 流式接口 `/api/analyze/stream`，现有前端仍默认使用非流式 `/api/analyze`。
@@ -36,18 +35,13 @@ npm start
 
 ## Cursor 模型配置
 
-在管理后台新增模型时：
+Cursor API Key 由后端固定配置，不在管理后台录入。可以使用环境变量：
 
-- 供应商：`cursor`
-- API Key：填写 Cursor API Key
-- 模型 ID：例如 `composer-2`
-- Base URL：留空
+```bash
+set CURSOR_API_KEY=你的 Cursor API Key
+```
 
-如果供应商填写为 `openai-compatible`，则继续使用 OpenAI Chat Completions 兼容协议：
-
-- Base URL：例如 `https://api.openai.com/v1`
-- API Key：对应模型服务的 API Key
-- 模型 ID：例如 `gpt-4.1`
+管理后台只维护 Cursor 模型显示名称和模型 ID，例如 `composer-2`。
 
 如果没有可调用模型，系统会返回本地关键词检索摘要，方便先验证项目、仓库、日志和代码索引流程。
 
