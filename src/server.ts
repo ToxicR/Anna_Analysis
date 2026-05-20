@@ -339,7 +339,10 @@ app.post("/api/analyze/stream", async (request, reply) => {
     const analysisType = payload.analysis_type || inferAnalysisType(question, logText);
 
     send("status", { message: "Cursor Agent 正在分析代码" });
-    const result = await analyzeWithModel(model, question, analysisType, chunks, logText, repos);
+    const result = await analyzeWithModel(model, question, analysisType, chunks, logText, repos, {
+      onStatus: (message) => send("status", { message }),
+      onDelta: (text) => send("delta", { text }),
+    });
     const insertResult = db.prepare(`
       INSERT INTO analysis_tasks(project_id, model_id, analysis_type, question, log_text, selected_repo_ids, status, result, created_at)
       VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?)

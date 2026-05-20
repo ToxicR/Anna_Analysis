@@ -437,6 +437,58 @@ async function refreshSelectedRepos(repoIds, pending) {
   });
 }
 
+async function streamAnalysis(payload, handlers) {
+  const response = await fetch("/api/analyze/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!response.ok || !response.body) {
+    const text = await response.text();
+    throw new Error(text || response.statusText);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalTask = null;
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const parts = buffer.split("\n\n");
+    buffer = parts.pop() || "";
+    for (const part of parts) {
+      const event = parseSseEvent(part);
+      if (!event) continue;
+      if (event.event === "status") handlers.onStatus?.(event.data.message || "");
+      if (event.event === "delta") handlers.onDelta?.(event.data.text || "");
+      if (event.event === "result") finalTask = event.data;
+      if (event.event === "error") throw new Error(event.data.detail || "分析失败");
+    }
+  }
+
+  if (buffer.trim()) {
+    const event = parseSseEvent(buffer);
+    if (event?.event === "result") finalTask = event.data;
+    if (event?.event === "error") throw new Error(event.data.detail || "分析失败");
+  }
+  return finalTask;
+}
+
+function parseSseEvent(raw) {
+  const lines = raw.split(/\r?\n/);
+  let event = "message";
+  const data = [];
+  for (const line of lines) {
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    if (line.startsWith("data:")) data.push(line.slice(5).trimStart());
+  }
+  if (!data.length) return null;
+  return { event, data: JSON.parse(data.join("\n")) };
+}
+
 async function runAnalysis() {
   const repoIds = [...$("analysisRepos").querySelectorAll("input:checked")].map((input) => Number(input.value));
   const question = $("question").value.trim();
@@ -454,17 +506,24 @@ async function runAnalysis() {
     await refreshSelectedRepos(repoIds, pending);
     renderMessageBody(pending.querySelector(".message-body"), "已获取最新代码，正在分析...");
     $("analysisResult").textContent = "正在分析...";
-    const task = await api("/api/analyze", {
-      method: "POST",
-      body: JSON.stringify({
-        project_id: Number($("analysisProject").value),
-        repo_ids: repoIds,
-        model_id: $("analysisModel").value ? Number($("analysisModel").value) : null,
-        question,
-        log_text: state.logAttachment.text,
-      }),
+    let streamedText = "";
+    const task = await streamAnalysis({
+      project_id: Number($("analysisProject").value),
+      repo_ids: repoIds,
+      model_id: $("analysisModel").value ? Number($("analysisModel").value) : null,
+      question,
+      log_text: state.logAttachment.text,
+    }, {
+      onStatus: (message) => {
+        if (message) $("analysisResult").textContent = message;
+        if (!streamedText && message) renderMessageBody(pending.querySelector(".message-body"), message);
+      },
+      onDelta: (text) => {
+        streamedText += text;
+        renderMessageBody(pending.querySelector(".message-body"), streamedText);
+      },
     });
-    renderMessageBody(pending.querySelector(".message-body"), task.result);
+    if (task?.result) renderMessageBody(pending.querySelector(".message-body"), task.result);
     $("analysisResult").textContent = "分析完成";
     await loadAll();
   } catch (error) {

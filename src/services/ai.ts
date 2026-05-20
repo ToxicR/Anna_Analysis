@@ -1,7 +1,12 @@
-import { Agent } from "@cursor/sdk";
+import { Agent, type SDKMessage } from "@cursor/sdk";
 import { db, getSetting, setSetting } from "../db.js";
 import type { AIModel, CodeChunk, GitRepo } from "../types.js";
 import { formatContext } from "./code.js";
+
+export interface AnalysisStreamCallbacks {
+  onStatus?: (message: string) => void;
+  onDelta?: (text: string) => void;
+}
 
 export function inferAnalysisType(question: string, logText: string): string {
   const text = `${question}\n${logText}`.toLowerCase();
@@ -24,12 +29,15 @@ export async function analyzeWithModel(
   chunks: CodeChunk[],
   logText: string,
   repos: GitRepo[],
+  stream?: AnalysisStreamCallbacks,
 ): Promise<string> {
   if (!model || !model.model_name) {
-    return localAnalysis(question, analysisType, chunks, logText);
+    const result = localAnalysis(question, analysisType, chunks, logText);
+    stream?.onDelta?.(result);
+    return result;
   }
 
-  return analyzeWithCursor(model, question, analysisType, chunks, logText, repos);
+  return analyzeWithCursor(model, question, analysisType, chunks, logText, repos, stream);
 }
 
 async function analyzeWithCursor(
@@ -39,15 +47,15 @@ async function analyzeWithCursor(
   chunks: CodeChunk[],
   logText: string,
   repos: GitRepo[],
+  stream?: AnalysisStreamCallbacks,
 ): Promise<string> {
   const cwd = repos.map((repo) => repo.local_path).filter(Boolean);
   if (!cwd.length) {
     throw new Error("未找到本地仓库路径，请先同步代码后再分析");
   }
-  const apiKey = getCursorApiKey(model);
 
   const agent = await Agent.create({
-    apiKey,
+    apiKey: getCursorApiKey(model),
     model: { id: model.model_name },
     name: "Anna Analysis",
     local: {
@@ -58,8 +66,30 @@ async function analyzeWithCursor(
   });
 
   try {
-    const prompt = buildCursorPrompt(question, analysisType, chunks, logText, repos);
-    const run = await agent.send(prompt, { local: { force: true } });
+    const run = await agent.send(buildCursorPrompt(question, analysisType, chunks, logText, repos), { local: { force: true } });
+
+    if (stream) {
+      let accumulated = "";
+      for await (const message of run.stream()) {
+        const update = streamMessageToText(message);
+        if (update.status) stream.onStatus?.(update.status);
+        if (update.text) {
+          const delta = toDelta(accumulated, update.text);
+          accumulated = update.text;
+          if (delta) stream.onDelta?.(delta);
+        }
+      }
+
+      const result = await run.wait();
+      if (result.status !== "finished") {
+        throw new Error(`Cursor 分析未完成，状态：${result.status}`);
+      }
+      const finalText = result.result?.trim() || accumulated.trim() || "Cursor Agent 未返回分析内容。";
+      const finalDelta = toDelta(accumulated, finalText);
+      if (finalDelta) stream.onDelta?.(finalDelta);
+      return finalText;
+    }
+
     const result = await run.wait();
     if (result.status !== "finished") {
       throw new Error(`Cursor 分析未完成，状态：${result.status}`);
@@ -68,6 +98,39 @@ async function analyzeWithCursor(
   } finally {
     agent.close();
   }
+}
+
+function streamMessageToText(message: SDKMessage): { status?: string; text?: string } {
+  if (message.type === "assistant") {
+    return {
+      text: message.message.content
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("\n"),
+    };
+  }
+  if (message.type === "thinking" && message.text) {
+    return { status: "Cursor Agent 正在思考..." };
+  }
+  if (message.type === "tool_call") {
+    const action = message.status === "running" ? "正在使用工具" : message.status === "completed" ? "工具执行完成" : "工具执行失败";
+    return { status: `${action}：${message.name}` };
+  }
+  if (message.type === "status") {
+    return { status: message.message || `Cursor Agent 状态：${message.status}` };
+  }
+  if (message.type === "task" && message.text) {
+    return { status: message.text };
+  }
+  return {};
+}
+
+function toDelta(previous: string, next: string): string {
+  if (!next) return "";
+  if (!previous) return next;
+  if (next.startsWith(previous)) return next.slice(previous.length);
+  if (previous.includes(next)) return "";
+  return `\n\n${next}`;
 }
 
 function buildCursorPrompt(
@@ -118,8 +181,7 @@ export function getCursorApiKey(model?: AIModel): string | undefined {
     setSetting("cursor_api_key", legacyKey);
     return legacyKey;
   }
-  const key = legacyKey;
-  return key || undefined;
+  return undefined;
 }
 
 function getLegacyCursorApiKey(): string {
@@ -135,7 +197,7 @@ function getLegacyCursorApiKey(): string {
 function localAnalysis(question: string, analysisType: string, chunks: CodeChunk[], logText: string): string {
   const lines = [
     "## 结论摘要",
-    "当前未配置可调用的 AI 模型，系统已基于关键词检索返回本地代码摘要。",
+    "当前未配置可调用的 Cursor 模型，系统已基于关键词检索返回本地代码摘要。",
     "",
     `- 分析类型：${analysisType}`,
     `- 问题：${question || "未填写问题"}`,
