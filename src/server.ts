@@ -443,7 +443,7 @@ function publicModel(model: AIModel): Omit<AIModel, "api_key" | "base_url"> & { 
 }
 
 function normalizeOutputMode(mode?: string): OutputMode {
-  return mode === "non_developer" ? "non_developer" : "developer";
+  return mode === "developer" ? "developer" : "non_developer";
 }
 
 function normalizeProjectName(name = ""): string {

@@ -42,7 +42,7 @@ export async function analyzeWithModel(
   repos: GitRepo[],
   conversationContext = "",
   chatSessionId = "",
-  outputMode: OutputMode = "developer",
+  outputMode: OutputMode = "non_developer",
   stream?: AnalysisStreamCallbacks,
 ): Promise<string> {
   if (!model || !model.model_name) {
