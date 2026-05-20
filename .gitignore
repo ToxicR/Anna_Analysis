@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+data/
+uvicorn.*.log
+e8c0f698-4882-4557-a8fb-70eaf650748f.png

@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Anna Analysis</title>
+  <link rel="icon" type="image/png" href="/static/assets/anna-logo.png">
+  <link rel="stylesheet" href="/static/styles.css?v=20260520-logo">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <img class="brand-mark" src="/static/assets/anna-logo.png" alt="Anna logo">
+        <div>
+          <h1>Anna Analysis</h1>
+          <p>代码与日志分析 Agent</p>
+        </div>
+      </div>
+
+      <section class="side-section">
+        <div class="section-title">当前上下文</div>
+        <label>项目</label>
+        <select id="analysisProject"></select>
+
+        <label>参与分析的仓库</label>
+        <div id="analysisRepos" class="repo-checks"></div>
+
+        <label>AI 模型</label>
+        <select id="analysisModel"></select>
+
+      </section>
+
+    </aside>
+
+    <main class="chat">
+      <header class="chat-header">
+        <div>
+          <h2>分析对话</h2>
+          <p id="chatContext">选择项目和仓库后，直接像和 Agent 对话一样提问。</p>
+        </div>
+        <div class="chat-actions">
+          <button id="clearChat" type="button">清空对话</button>
+          <button id="openAdmin" type="button" class="primary">管理后台</button>
+        </div>
+      </header>
+
+      <section id="chatMessages" class="chat-messages">
+        <article class="message assistant">
+          <img class="avatar ai-avatar" src="/static/assets/anna-logo.png" alt="Anna AI">
+          <div class="bubble">
+            <div class="message-meta">Anna Analysis</div>
+            <div class="message-body">选择项目、仓库和模型后，输入你要分析的问题。例如：Android 调用 C++ 的链路是怎么实现的？或者上传日志后让我分析崩溃原因。</div>
+          </div>
+        </article>
+      </section>
+
+      <footer id="composer" class="composer">
+        <div id="attachmentBar" class="attachment-bar" hidden>
+          <span id="attachmentName"></span>
+          <button id="removeAttachment" type="button">移除</button>
+        </div>
+        <input id="logFile" type="file" hidden>
+        <textarea id="question" rows="3" placeholder="输入问题，例如：这个功能是怎么实现的？根据日志定位问题原因。"></textarea>
+        <div class="composer-actions">
+          <div class="composer-left">
+            <button id="addAttachment" type="button" class="icon-button" title="添加日志文件">+</button>
+            <div id="analysisResult" class="status-text">准备就绪</div>
+          </div>
+          <button id="runAnalysis" class="primary">发送分析</button>
+        </div>
+      </footer>
+    </main>
+
+  </div>
+
+  <div id="adminBackdrop" class="admin-backdrop" hidden>
+    <aside class="inspector admin-panel">
+      <div class="admin-panel-header">
+        <div>
+          <h2>管理后台</h2>
+          <p>维护项目、仓库、模型和 GitLab Token</p>
+        </div>
+        <button id="closeAdmin" type="button">关闭</button>
+      </div>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <h2 id="projectFormTitle">项目与仓库</h2>
+          <button id="cancelEditProject" type="button">取消编辑</button>
+        </div>
+
+        <label>项目名称</label>
+        <input id="projectName" placeholder="例如：音视频分析项目">
+        <label>项目描述</label>
+        <textarea id="projectDesc" rows="3" placeholder="项目说明，可选"></textarea>
+
+        <div class="repo-slot">
+          <h3>Android 仓库</h3>
+          <label>GitLab 地址</label>
+          <input id="androidRepoUrl" placeholder="https://gitlab.example.com/group/android.git">
+          <label>分支</label>
+          <input id="androidRepoBranch" value="main">
+        </div>
+
+        <div class="repo-slot">
+          <h3>C++ 仓库</h3>
+          <label>GitLab 地址</label>
+          <input id="cppRepoUrl" placeholder="https://gitlab.example.com/group/native.git">
+          <label>分支</label>
+          <input id="cppRepoBranch" value="main">
+        </div>
+
+        <button id="saveProject" class="primary full">保存项目和仓库</button>
+      </section>
+
+      <section class="panel">
+        <h2>已添加项目</h2>
+        <div id="projectList" class="list"></div>
+      </section>
+
+      <section class="panel">
+        <h2>项目仓库</h2>
+        <div id="repoList" class="list"></div>
+      </section>
+
+      <section class="panel">
+        <h2>全局 GitLab Token</h2>
+        <label>访问 Token</label>
+        <input id="globalGitlabToken" type="password" placeholder="所有 GitLab 仓库同步共用">
+        <button id="saveGitlabToken" class="full">保存 Token</button>
+        <div id="gitlabTokenStatus" class="status-text">未配置</div>
+      </section>
+
+      <section class="panel">
+        <h2>AI 模型</h2>
+        <label>显示名称</label>
+        <input id="modelName" placeholder="例如：DeepSeek">
+        <label>供应商</label>
+        <input id="modelProvider" value="openai-compatible">
+        <label>Base URL</label>
+        <input id="modelBaseUrl" placeholder="例如：https://api.openai.com/v1">
+        <label>API Key</label>
+        <input id="modelApiKey" type="password">
+        <label>模型 ID</label>
+        <input id="modelId" placeholder="例如：deepseek-chat">
+        <label class="inline"><input id="modelDefault" type="checkbox"> 设为默认</label>
+        <button id="saveModel" class="full">保存模型</button>
+        <div id="modelList" class="list"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <h2>分析历史</h2>
+          <button id="clearTasks" type="button" class="danger">清空</button>
+        </div>
+        <div id="taskList" class="list history"></div>
+      </section>
+    </aside>
+  </div>
+
+  <script src="/static/app.js?v=20260520-logo"></script>
+</body>
+</html>
