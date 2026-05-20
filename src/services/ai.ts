@@ -1,4 +1,4 @@
-import { Agent, type SDKMessage } from "@cursor/sdk";
+import { Agent, type SDKAgent, type SDKMessage } from "@cursor/sdk";
 import { db, getSetting, setSetting } from "../db.js";
 import type { AIModel, CodeChunk, GitRepo } from "../types.js";
 import { formatContext } from "./code.js";
@@ -7,6 +7,15 @@ export interface AnalysisStreamCallbacks {
   onStatus?: (message: string) => void;
   onDelta?: (text: string) => void;
 }
+
+interface CursorSession {
+  agentId: string;
+  agent: SDKAgent;
+  updatedAt: number;
+}
+
+const cursorSessions = new Map<string, CursorSession>();
+const SESSION_TTL_MS = 1000 * 60 * 60 * 3;
 
 export function inferAnalysisType(question: string, logText: string): string {
   const text = `${question}\n${logText}`.toLowerCase();
@@ -30,6 +39,7 @@ export async function analyzeWithModel(
   logText: string,
   repos: GitRepo[],
   conversationContext = "",
+  chatSessionId = "",
   stream?: AnalysisStreamCallbacks,
 ): Promise<string> {
   if (!model || !model.model_name) {
@@ -38,7 +48,7 @@ export async function analyzeWithModel(
     return result;
   }
 
-  return analyzeWithCursor(model, question, analysisType, chunks, logText, repos, conversationContext, stream);
+  return analyzeWithCursor(model, question, analysisType, chunks, logText, repos, conversationContext, chatSessionId, stream);
 }
 
 async function analyzeWithCursor(
@@ -49,6 +59,7 @@ async function analyzeWithCursor(
   logText: string,
   repos: GitRepo[],
   conversationContext: string,
+  chatSessionId: string,
   stream?: AnalysisStreamCallbacks,
 ): Promise<string> {
   const cwd = repos.map((repo) => repo.local_path).filter(Boolean);
@@ -56,19 +67,13 @@ async function analyzeWithCursor(
     throw new Error("未找到本地仓库路径，请先同步代码后再分析");
   }
 
-  const agent = await Agent.create({
-    apiKey: getCursorApiKey(model),
-    model: { id: model.model_name },
-    name: "Anna Analysis",
-    local: {
-      cwd: cwd.length === 1 ? cwd[0] : cwd,
-      sandboxOptions: { enabled: false },
-      settingSources: ["project"],
-    },
-  });
+  const sessionKey = buildSessionKey(chatSessionId, model, repos, cwd);
+  const agent = await getOrCreateCursorAgent(sessionKey, model, cwd, stream);
 
   try {
-    const run = await agent.send(buildCursorPrompt(question, analysisType, chunks, logText, repos, conversationContext), { local: { force: true } });
+    const run = await agent.send(buildCursorPrompt(question, analysisType, chunks, logText, repos, conversationContext), {
+      local: { force: true },
+    });
 
     if (stream) {
       let accumulated = "";
@@ -98,7 +103,54 @@ async function analyzeWithCursor(
     }
     return result.result?.trim() || "Agent 未返回分析内容。";
   } finally {
-    agent.close();
+    const session = cursorSessions.get(sessionKey);
+    if (session) session.updatedAt = Date.now();
+    cleanupExpiredCursorSessions();
+  }
+}
+
+async function getOrCreateCursorAgent(
+  sessionKey: string,
+  model: AIModel,
+  cwd: string[],
+  stream?: AnalysisStreamCallbacks,
+): Promise<SDKAgent> {
+  const existing = cursorSessions.get(sessionKey);
+  if (existing) {
+    existing.updatedAt = Date.now();
+    stream?.onStatus?.("Agent 会话已连接");
+    return existing.agent;
+  }
+
+  const agent = await Agent.create({
+    apiKey: getCursorApiKey(model),
+    model: { id: model.model_name },
+    name: "Anna Analysis",
+    local: {
+      cwd: cwd.length === 1 ? cwd[0] : cwd,
+      sandboxOptions: { enabled: false },
+      settingSources: ["project"],
+    },
+  });
+  cursorSessions.set(sessionKey, { agentId: agent.agentId, agent, updatedAt: Date.now() });
+  stream?.onStatus?.("Agent 会话已创建");
+  return agent;
+}
+
+function buildSessionKey(chatSessionId: string, model: AIModel, repos: GitRepo[], cwd: string[]): string {
+  const repoKey = repos
+    .map((repo) => `${repo.id}:${repo.branch}:${repo.local_path}`)
+    .sort()
+    .join("|");
+  return [chatSessionId || "default", model.id, model.model_name, repoKey, cwd.join("|")].join("::");
+}
+
+function cleanupExpiredCursorSessions(): void {
+  const now = Date.now();
+  for (const [key, session] of cursorSessions) {
+    if (now - session.updatedAt <= SESSION_TTL_MS) continue;
+    void session.agent.close();
+    cursorSessions.delete(key);
   }
 }
 
@@ -145,25 +197,27 @@ function buildCursorPrompt(
 ): string {
   const repoList = repos.map((repo) => `- ${repo.name}: ${repo.local_path} (${repo.branch})`).join("\n");
   const logSection = logText.trim() ? `\n日志内容：\n${logText.slice(0, 12000)}\n` : "";
-  const conversationSection = conversationContext.trim() ? `\n本轮对话上下文（用于理解“继续/上一步/下一步/它/这个问题”等指代）：\n${conversationContext.slice(-12000)}\n` : "";
-  const troubleshootingRule = analysisType === "incident"
-    ? "- 如果是问题排查，最后给“下一步排查”，最多 3 条。"
-    : "- 不输出“下一步建议”或泛泛排查建议，除非用户明确要求。";
-  return `你是 Anna Analysis 的代码分析 Agent。请只读分析代码，不要修改文件、不要提交代码、不要执行破坏性命令。
+  const conversationSection = conversationContext.trim()
+    ? `\n本轮对话上下文（用于理解“继续、上一轮、下一步、它、这个问题”等指代）：\n${conversationContext.slice(-12000)}\n`
+    : "";
+  const troubleshootingRule =
+    analysisType === "incident"
+      ? "- 如果是问题排查，最后给“下一步排查”，最多 3 条。"
+      : "- 不输出“下一步建议”或泛泛排查建议，除非用户明确要求。";
 
+  return `你是 Anna Analysis 的代码分析 Agent。请只读分析代码，不要修改文件、不要提交代码、不要执行破坏性命令。
 分析类型：${analysisType}
 
 参与分析的仓库：
 ${repoList}
 
-用户问题：
-${question}
+用户问题：${question}
 ${conversationSection}
 ${logSection}
 当前系统本地检索到的候选代码片段：
 ${formatContext(chunks)}
 
-请你根据仓库里的最新代码继续阅读必要文件，先判断用户问的目标功能/概念是否在代码中直接存在。
+请根据仓库里的最新代码继续阅读必要文件，先判断用户问的目标功能/概念是否在代码中直接存在。
 
 如果目标功能/概念未命中，必须按“未命中格式”输出：
 ## 结论
@@ -232,32 +286,33 @@ function getLegacyCursorApiKey(): string {
 function localAnalysis(question: string, analysisType: string, chunks: CodeChunk[], logText: string): string {
   const lines = [
     "## 结论摘要",
-    "当前未配置可调用的 Cursor 模型，系统已基于关键词检索返回本地代码摘要。",
+    `当前问题：${question}`,
+    `系统判断类型：${analysisType}`,
     "",
-    `- 分析类型：${analysisType}`,
-    `- 问题：${question || "未填写问题"}`,
+    "## 相关代码文件和关键方法",
   ];
 
-  if (logText.trim()) {
-    lines.push(`- 日志：已上传，长度 ${logText.length} 字符`);
-  }
-
-  lines.push("", "## 命中的代码文件");
-  if (chunks.length) {
-    for (const chunk of chunks) {
-      const preview = chunk.content.trim().replace(/\s+/g, " ").slice(0, 260);
-      lines.push(`- \`${chunk.file_path}\`：${preview}`);
-    }
+  if (!chunks.length) {
+    lines.push("- 未检索到直接相关的代码片段，请先确认已选择仓库并同步代码。");
   } else {
-    lines.push("- 未命中代码片段。建议换用更接近代码命名的关键词，例如页面类名、字段名、接口名、英文单词或具体 UI 文案。");
+    chunks.slice(0, 8).forEach((chunk) => {
+      lines.push(`- ${chunk.file_path}: ${chunk.language || "相关片段"}`);
+    });
   }
 
+  lines.push("", "## 实现流程或问题原因");
   lines.push(
-    "",
-    "## 下一步建议",
-    "- 配置模型后，可以让 Agent 直接在仓库目录中继续阅读代码并给出完整分析。",
-    "- 如果当前问题是功能实现分析，不需要上传日志；只有排查运行异常时才需要日志。",
+    chunks.length
+      ? "已根据当前索引列出最相关代码入口。建议切换到 Cursor 模型以便继续跨文件阅读和推理。"
+      : "缺少可引用代码上下文，无法给出可靠结论。",
   );
 
+  if (logText.trim()) {
+    lines.push("", "## 日志线索");
+    lines.push(logText.slice(0, 1000));
+  }
+
+  lines.push("", "## 下一步排查/修复建议");
+  lines.push("- 选择 Cursor 模型后重新发送问题，让 Agent 结合仓库代码继续分析。");
   return lines.join("\n");
 }

@@ -7,9 +7,14 @@ const state = {
   editingProjectId: null,
   logAttachment: { name: "", text: "" },
   chatTurns: [],
+  chatSessionId: createChatSessionId(),
 };
 
 const $ = (id) => document.getElementById(id);
+
+function createChatSessionId() {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -544,6 +549,7 @@ async function runAnalysis() {
       question,
       log_text: state.logAttachment.text,
       conversation_context: conversationContext,
+      chat_session_id: state.chatSessionId,
     }, {
       onStatus: (message) => {
         if (message) $("analysisResult").textContent = message;
@@ -601,7 +607,13 @@ function clearChat() {
     </article>
   `;
   state.chatTurns = [];
+  state.chatSessionId = createChatSessionId();
   $("analysisResult").textContent = "准备就绪";
+}
+
+function resetChatSession() {
+  state.chatTurns = [];
+  state.chatSessionId = createChatSessionId();
 }
 
 function escapeHtml(value) {
@@ -614,11 +626,18 @@ function escapeHtml(value) {
 }
 
 $("analysisProject").addEventListener("change", () => {
+  resetChatSession();
   renderAnalysisRepos();
   renderChatContext();
 });
-$("analysisModel").addEventListener("change", renderChatContext);
-$("analysisRepos").addEventListener("change", renderChatContext);
+$("analysisModel").addEventListener("change", () => {
+  resetChatSession();
+  renderChatContext();
+});
+$("analysisRepos").addEventListener("change", () => {
+  resetChatSession();
+  renderChatContext();
+});
 $("saveProject").addEventListener("click", () => saveProject().catch(alertError));
 $("cancelEditProject").addEventListener("click", clearProjectForm);
 $("saveGitlabToken").addEventListener("click", () => saveGitlabToken().catch(alertError));
