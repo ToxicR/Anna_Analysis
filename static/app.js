@@ -68,7 +68,7 @@ function render() {
 
 function renderSelectors() {
   $("analysisProject").innerHTML = optionList(state.projects, (project) => project.name);
-  $("analysisModel").innerHTML = `<option value="">默认/本地摘要</option>${optionList(state.models.filter((model) => model.enabled), (model) => model.is_default ? `${model.name}（默认）` : model.name)}`;
+  $("analysisModel").innerHTML = `<option value="">Auto</option>${optionList(state.models.filter((model) => model.enabled), (model) => model.is_default ? `${model.name}（默认）` : model.name)}`;
   renderAnalysisRepos();
 }
 
@@ -85,7 +85,7 @@ function renderChatContext() {
   const project = state.projects.find((item) => item.id === Number($("analysisProject").value));
   const repoCount = $("analysisRepos").querySelectorAll("input:checked").length;
   const modelSelect = $("analysisModel");
-  const modelName = modelSelect.options[modelSelect.selectedIndex]?.textContent || "默认/本地摘要";
+  const modelName = modelSelect.options[modelSelect.selectedIndex]?.textContent || "Auto";
   $("chatContext").textContent = project
     ? `当前项目：${project.name} · 已选仓库：${repoCount} · 模型：${modelName}`
     : "请先在管理后台添加项目和仓库。";
@@ -737,7 +737,7 @@ renderChatContext = function renderChatContextWithOutputMode() {
   const context = $("chatContext");
   if (!context || !state.projects.length) return;
   const mode = $("outputMode")?.value;
-  const outputModeName = mode === "developer" ? "研发模式" : mode === "non_developer" ? "非研发模式" : "Auto";
+  const outputModeName = mode === "developer" ? "研发模式" : "非研发模式";
   if (!context.textContent.includes(outputModeName)) {
     context.textContent = `${context.textContent} · ${outputModeName}`;
   }
