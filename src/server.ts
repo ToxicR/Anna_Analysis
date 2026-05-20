@@ -15,6 +15,15 @@ import type { AIModel, AnalysisTask, GitRepo, Project, ProjectWithReposInput, Re
 dotenv.config();
 initDb();
 
+interface UploadedAttachment {
+  file_name: string;
+  stored_name: string;
+  mime_type: string;
+  path: string;
+  size: number;
+  text: string;
+}
+
 const app = Fastify({ logger: true, bodyLimit: 5 * 1024 * 1024 });
 
 await app.register(cors, { origin: true });
@@ -370,12 +379,28 @@ app.post("/api/analyze/stream", async (request, reply) => {
 });
 
 app.post("/api/analyze/upload-log", async (request, reply) => {
-  const file = await request.file();
-  if (!file) return badRequest(reply, "请选择日志文件");
-  const safeName = path.basename(file.filename);
-  const buffer = await file.toBuffer();
-  fs.writeFileSync(path.join(UPLOAD_DIR, safeName), buffer);
-  return { file_name: safeName, text: buffer.toString("utf8").slice(0, 200_000) };
+  const uploaded: UploadedAttachment[] = [];
+  for await (const file of request.files()) {
+    const safeName = path.basename(file.filename);
+    const storedName = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}-${safeName}`;
+    const filePath = path.join(UPLOAD_DIR, storedName);
+    const buffer = await file.toBuffer();
+    fs.writeFileSync(filePath, buffer);
+    const text = isTextAttachment(safeName, file.mimetype) ? buffer.toString("utf8").slice(0, 100_000) : "";
+    uploaded.push({
+      file_name: safeName,
+      stored_name: storedName,
+      mime_type: file.mimetype,
+      path: filePath,
+      size: buffer.length,
+      text,
+    });
+  }
+
+  if (!uploaded.length) return badRequest(reply, "请选择要分析的附件");
+
+  const text = uploaded.map((file) => formatAttachmentForPrompt(file)).join("\n\n");
+  return { files: uploaded, text, file_name: uploaded.map((file) => file.file_name).join(", ") };
 });
 
 app.get("/api/tasks", async (request) => {
@@ -444,6 +469,34 @@ function publicModel(model: AIModel): Omit<AIModel, "api_key" | "base_url"> & { 
 
 function normalizeOutputMode(mode?: string): OutputMode {
   return mode === "developer" ? "developer" : "non_developer";
+}
+
+function isTextAttachment(fileName: string, mimeType: string): boolean {
+  return (
+    mimeType.startsWith("text/") ||
+    mimeType.includes("json") ||
+    mimeType.includes("xml") ||
+    /\.(log|txt|json|xml|csv|md|trace|out|err|ini|properties|yaml|yml)$/i.test(fileName)
+  );
+}
+
+function formatAttachmentForPrompt(file: UploadedAttachment): string {
+  const header = [
+    `附件：${file.file_name}`,
+    `类型：${file.mime_type || "unknown"}`,
+    `大小：${file.size} bytes`,
+    `本地路径：${file.path}`,
+  ].join("\n");
+
+  if (file.text) {
+    return `${header}\n内容预览：\n${file.text}`;
+  }
+
+  if (file.mime_type.startsWith("image/")) {
+    return `${header}\n这是图片附件。请结合图片中的界面、报错、图表或截图内容进行分析；如需要引用，请引用上面的本地路径。`;
+  }
+
+  return `${header}\n这是非文本附件。请优先根据文件名、类型和本地路径判断是否需要读取该文件。`;
 }
 
 function normalizeProjectName(name = ""): string {

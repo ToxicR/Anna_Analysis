@@ -5,7 +5,8 @@ const state = {
   tasks: [],
   settings: {},
   editingProjectId: null,
-  logAttachment: { name: "", text: "" },
+  attachments: [],
+  attachmentText: "",
   chatTurns: [],
   chatSessionId: createChatSessionId(),
 };
@@ -521,15 +522,25 @@ function parseSseEvent(raw) {
   return { event, data: JSON.parse(data.join("\n")) };
 }
 
+function attachmentText() {
+  return state.attachmentText || state.attachments.map((file) => file.text).filter(Boolean).join("\n\n");
+}
+
+function attachmentNames() {
+  return state.attachments.map((file) => file.file_name || file.name).filter(Boolean).join("、");
+}
+
 async function runAnalysis() {
   const repoIds = [...$("analysisRepos").querySelectorAll("input:checked")].map((input) => Number(input.value));
   const question = $("question").value.trim();
+  const currentAttachmentText = attachmentText();
+  const currentAttachmentNames = attachmentNames();
   if (!repoIds.length) throw new Error("请至少选择一个参与分析的仓库");
-  if (!question && !state.logAttachment.text) throw new Error("请输入要分析的问题，或添加日志文件");
+  if (!question && !state.attachments.length) throw new Error("请输入要分析的问题，或添加附件");
 
   const project = state.projects.find((item) => item.id === Number($("analysisProject").value));
-  const meta = `${project?.name || "未选择项目"} · 自动判断分析方式${state.logAttachment.name ? ` · 附件：${state.logAttachment.name}` : ""}`;
-  const userMessage = question || `分析日志文件：${state.logAttachment.name}`;
+  const meta = `${project?.name || "未选择项目"} · 自动判断分析方式${currentAttachmentNames ? ` · 附件：${currentAttachmentNames}` : ""}`;
+  const userMessage = question || `分析附件：${currentAttachmentNames}`;
   const conversationContext = conversationContextForNextTurn();
   appendMessage("user", userMessage, meta);
   rememberTurn("user", userMessage, meta);
@@ -547,7 +558,7 @@ async function runAnalysis() {
       repo_ids: repoIds,
       model_id: $("analysisModel").value ? Number($("analysisModel").value) : null,
       question,
-      log_text: state.logAttachment.text,
+      log_text: currentAttachmentText,
       conversation_context: conversationContext,
       chat_session_id: state.chatSessionId,
       output_mode: $("outputMode").value,
@@ -574,23 +585,28 @@ async function runAnalysis() {
   }
 }
 
-async function attachLogFile(file) {
+async function attachLogFiles(files) {
+  const selectedFiles = [...files];
+  if (!selectedFiles.length) return;
   const form = new FormData();
-  form.append("file", file);
+  selectedFiles.forEach((file) => form.append("files", file));
   const result = await api("/api/analyze/upload-log", { method: "POST", body: form });
-  state.logAttachment = { name: result.file_name, text: result.text };
-  $("attachmentName").textContent = `已添加日志：${result.file_name}`;
+  state.attachments.push(...(result.files || []));
+  state.attachmentText = [state.attachmentText, result.text].filter(Boolean).join("\n\n");
+  $("attachmentName").textContent = `已添加附件：${attachmentNames()}`;
   $("attachmentBar").hidden = false;
-  $("analysisResult").textContent = `已添加日志：${result.file_name}`;
+  $("analysisResult").textContent = `已添加 ${state.attachments.length} 个附件`;
 }
 
 async function uploadLog() {
-  const file = $("logFile").files[0];
-  if (file) await attachLogFile(file);
+  const files = $("logFile").files;
+  if (files?.length) await attachLogFiles(files);
+  $("logFile").value = "";
 }
 
 function removeAttachment() {
-  state.logAttachment = { name: "", text: "" };
+  state.attachments = [];
+  state.attachmentText = "";
   $("logFile").value = "";
   $("attachmentName").textContent = "";
   $("attachmentBar").hidden = true;
@@ -689,8 +705,8 @@ $("question").addEventListener("keydown", (event) => {
 });
 
 $("composer").addEventListener("drop", (event) => {
-  const file = event.dataTransfer?.files?.[0];
-  if (file) attachLogFile(file).catch(alertError);
+  const files = event.dataTransfer?.files;
+  if (files?.length) attachLogFiles(files).catch(alertError);
 });
 
 $("projectList").addEventListener("click", (event) => {

@@ -66,11 +66,11 @@
           <span id="attachmentName"></span>
           <button id="removeAttachment" type="button">移除</button>
         </div>
-        <input id="logFile" type="file" hidden>
+        <input id="logFile" type="file" multiple hidden>
         <textarea id="question" rows="3" placeholder="输入问题，例如：这个功能是怎么实现的？根据日志定位问题原因。"></textarea>
         <div class="composer-actions">
           <div class="composer-left">
-            <button id="addAttachment" type="button" class="icon-button" title="添加日志文件">+</button>
+            <button id="addAttachment" type="button" class="icon-button" title="添加附件">+</button>
             <div id="analysisResult" class="status-text">准备就绪</div>
           </div>
           <button id="runAnalysis" class="primary">发送分析</button>
