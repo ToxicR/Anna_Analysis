@@ -1,5 +1,5 @@
 import { Agent } from "@cursor/sdk";
-import { getSetting } from "../db.js";
+import { db, getSetting, setSetting } from "../db.js";
 import type { AIModel, CodeChunk, GitRepo } from "../types.js";
 import { formatContext } from "./code.js";
 
@@ -106,9 +106,30 @@ ${formatContext(chunks)}
 - 输出 Markdown，但避免复杂表格，优先使用清晰列表。`;
 }
 
-function getCursorApiKey(model: AIModel): string | undefined {
-  const key = process.env.CURSOR_API_KEY?.trim() || getSetting("cursor_api_key").trim() || model.api_key?.trim();
+export function getCursorApiKey(model?: AIModel): string | undefined {
+  const envKey = process.env.CURSOR_API_KEY?.trim();
+  if (envKey) return envKey;
+
+  const settingKey = getSetting("cursor_api_key").trim();
+  if (settingKey) return settingKey;
+
+  const legacyKey = model?.api_key?.trim() || getLegacyCursorApiKey();
+  if (legacyKey) {
+    setSetting("cursor_api_key", legacyKey);
+    return legacyKey;
+  }
+  const key = legacyKey;
   return key || undefined;
+}
+
+function getLegacyCursorApiKey(): string {
+  const row = db.prepare(`
+    SELECT api_key FROM ai_models
+    WHERE provider = 'cursor' AND api_key != ''
+    ORDER BY id DESC
+    LIMIT 1
+  `).get() as { api_key: string } | undefined;
+  return row?.api_key?.trim() ?? "";
 }
 
 function localAnalysis(question: string, analysisType: string, chunks: CodeChunk[], logText: string): string {

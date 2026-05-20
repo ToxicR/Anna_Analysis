@@ -124,6 +124,9 @@ function renderModels() {
     <div class="item">
       <strong>${escapeHtml(model.name)}${model.is_default ? "（默认）" : ""}</strong>
       <small>Cursor · ${escapeHtml(model.model_name || "未填写模型 ID")}</small>
+      <div class="actions">
+        <button data-default-model="${model.id}" ${model.is_default ? "disabled" : ""}>设为默认</button>
+      </div>
     </div>
   `).join("");
 }
@@ -246,20 +249,12 @@ async function saveGitlabToken() {
   await loadAll();
 }
 
-async function saveModel() {
-  await api("/api/models", {
-      method: "POST",
-      body: JSON.stringify({
-        name: $("modelName").value.trim(),
-        provider: "cursor",
-        base_url: "",
-        model_name: $("modelId").value.trim(),
-        is_default: $("modelDefault").checked,
-      }),
-    });
-  $("modelName").value = "";
-  $("modelId").value = "";
-  $("modelDefault").checked = false;
+async function refreshModels() {
+  await loadAll();
+}
+
+async function setDefaultModel(modelId) {
+  await api(`/api/models/${modelId}`, { method: "PUT", body: JSON.stringify({}) });
   await loadAll();
 }
 
@@ -535,7 +530,11 @@ $("analysisRepos").addEventListener("change", renderChatContext);
 $("saveProject").addEventListener("click", () => saveProject().catch(alertError));
 $("cancelEditProject").addEventListener("click", clearProjectForm);
 $("saveGitlabToken").addEventListener("click", () => saveGitlabToken().catch(alertError));
-$("saveModel").addEventListener("click", () => saveModel().catch(alertError));
+$("refreshModels").addEventListener("click", () => refreshModels().catch(alertError));
+$("modelList").addEventListener("click", (event) => {
+  const modelId = event.target?.dataset?.defaultModel;
+  if (modelId) setDefaultModel(Number(modelId)).catch(alertError);
+});
 $("runAnalysis").addEventListener("click", () => runAnalysis().catch(alertError));
 $("clearChat").addEventListener("click", clearChat);
 $("clearTasks").addEventListener("click", () => clearTasks().catch(alertError));

@@ -66,13 +66,3 @@ export interface ProjectWithReposInput {
   android_repo?: RepoSlotInput;
   cpp_repo?: RepoSlotInput;
 }
-
-export interface ModelInput {
-  name: string;
-  provider?: string;
-  base_url?: string;
-  api_key?: string;
-  model_name?: string;
-  enabled?: boolean;
-  is_default?: boolean;
-}

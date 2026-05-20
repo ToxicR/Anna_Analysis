@@ -9,7 +9,8 @@ import { db, boolToInt, getSetting, initDb, normalizeRow, normalizeRows, nowIso,
 import { STATIC_DIR, UPLOAD_DIR } from "./paths.js";
 import { inferAnalysisType, analyzeWithModel } from "./services/ai.js";
 import { searchCode, syncRepo } from "./services/code.js";
-import type { AIModel, AnalysisTask, GitRepo, ModelInput, Project, ProjectWithReposInput, RepoSlotInput } from "./types.js";
+import { syncCursorModels } from "./services/cursor-models.js";
+import type { AIModel, AnalysisTask, GitRepo, Project, ProjectWithReposInput, RepoSlotInput } from "./types.js";
 
 dotenv.config();
 initDb();
@@ -249,66 +250,25 @@ app.put("/api/settings/gitlab-token", async (request) => {
 });
 
 app.get("/api/models", async () => {
-  const rows = db.prepare("SELECT * FROM ai_models WHERE provider = 'cursor' ORDER BY id DESC").all() as AIModel[];
-  return normalizeRows(rows).map(publicModel);
+  const rows = await syncCursorModels();
+  return rows.map(publicModel);
 });
 
 app.post("/api/models", async (request, reply) => {
-  const payload = request.body as ModelInput;
-  if (!payload.name?.trim()) return badRequest(reply, "请填写模型名称");
-  if (payload.is_default) db.prepare("UPDATE ai_models SET is_default = 0").run();
-  try {
-    const result = db.prepare(`
-      INSERT INTO ai_models(name, provider, base_url, api_key, model_name, enabled, is_default, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      payload.name.trim(),
-      "cursor",
-      "",
-      "",
-      payload.model_name?.trim() || "composer-2",
-      boolToInt(payload.enabled),
-      boolToInt(payload.is_default, false),
-      nowIso(),
-    );
-    return publicModel(normalizeRow(getModel(Number(result.lastInsertRowid))!));
-  } catch (error) {
-    return duplicateError(reply, error);
-  }
+  return badRequest(reply, "Cursor 模型列表由 Cursor SDK 自动获取，不支持手动新增");
 });
 
 app.put("/api/models/:modelId", async (request, reply) => {
   const modelId = Number((request.params as { modelId: string }).modelId);
-  if (!getModel(modelId)) return notFound(reply, "模型不存在");
-  const payload = request.body as ModelInput;
-  if (!payload.name?.trim()) return badRequest(reply, "请填写模型名称");
-  if (payload.is_default) db.prepare("UPDATE ai_models SET is_default = 0 WHERE id != ?").run(modelId);
-  try {
-    db.prepare(`
-      UPDATE ai_models
-      SET name = ?, provider = ?, base_url = ?, api_key = ?, model_name = ?, enabled = ?, is_default = ?
-      WHERE id = ?
-    `).run(
-      payload.name.trim(),
-      "cursor",
-      "",
-      "",
-      payload.model_name?.trim() || "composer-2",
-      boolToInt(payload.enabled),
-      boolToInt(payload.is_default, false),
-      modelId,
-    );
-    return publicModel(normalizeRow(getModel(modelId)!));
-  } catch (error) {
-    return duplicateError(reply, error);
-  }
+  const model = getModel(modelId);
+  if (!model) return notFound(reply, "模型不存在");
+  db.prepare("UPDATE ai_models SET is_default = 0 WHERE provider = 'cursor'").run();
+  db.prepare("UPDATE ai_models SET is_default = 1 WHERE id = ?").run(modelId);
+  return publicModel(normalizeRow(getModel(modelId)!));
 });
 
 app.delete("/api/models/:modelId", async (request, reply) => {
-  const modelId = Number((request.params as { modelId: string }).modelId);
-  if (!getModel(modelId)) return notFound(reply, "模型不存在");
-  db.prepare("DELETE FROM ai_models WHERE id = ?").run(modelId);
-  return { ok: true };
+  return badRequest(reply, "Cursor 模型列表由 Cursor SDK 自动获取，不支持手动删除");
 });
 
 app.post("/api/analyze", async (request, reply) => {

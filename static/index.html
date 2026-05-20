@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Anna Analysis</title>
   <link rel="icon" type="image/png" href="/static/assets/anna-logo.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260520-cursor-only">
+  <link rel="stylesheet" href="/static/styles.css?v=20260520-model-sync">
 </head>
 <body>
   <div class="app-shell">
@@ -133,13 +133,11 @@
       </section>
 
       <section class="panel">
-        <h2>AI 模型</h2>
-        <label>显示名称</label>
-        <input id="modelName" placeholder="例如：Cursor Composer">
-        <label>模型 ID</label>
-        <input id="modelId" placeholder="例如：composer-2">
-        <label class="inline"><input id="modelDefault" type="checkbox"> 设为默认</label>
-        <button id="saveModel" class="full">保存模型</button>
+        <div class="panel-heading">
+          <h2>Cursor 模型</h2>
+          <button id="refreshModels" type="button">刷新</button>
+        </div>
+        <div class="status-text">模型列表由 Cursor SDK 自动获取</div>
         <div id="modelList" class="list"></div>
       </section>
 
@@ -153,6 +151,6 @@
     </aside>
   </div>
 
-  <script src="/static/app.js?v=20260520-cursor-only"></script>
+  <script src="/static/app.js?v=20260520-model-sync"></script>
 </body>
 </html>
