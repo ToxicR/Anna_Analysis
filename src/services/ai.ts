@@ -142,6 +142,9 @@ function buildCursorPrompt(
 ): string {
   const repoList = repos.map((repo) => `- ${repo.name}: ${repo.local_path} (${repo.branch})`).join("\n");
   const logSection = logText.trim() ? `\n日志内容：\n${logText.slice(0, 12000)}\n` : "";
+  const troubleshootingRule = analysisType === "incident"
+    ? "- 如果是问题排查，最后给“下一步排查”，最多 3 条。"
+    : "- 不输出“下一步建议”或泛泛排查建议，除非用户明确要求。";
   return `你是 Anna Analysis 的代码分析 Agent。请只读分析代码，不要修改文件、不要提交代码、不要执行破坏性命令。
 
 分析类型：${analysisType}
@@ -155,18 +158,29 @@ ${logSection}
 当前系统本地检索到的候选代码片段：
 ${formatContext(chunks)}
 
-请你根据仓库里的最新代码继续阅读必要文件，然后输出：
-1. 结论摘要
-2. 相关代码文件和关键方法
-3. 实现流程或问题根因
-4. 事实依据和推测项
-5. 下一步排查/继续阅读建议
+请你根据仓库里的最新代码继续阅读必要文件，然后按下面风格输出：
+- 结论优先，第一段直接回答用户问题，1-3 句话。
+- 默认控制在 800 字以内。
+- 只回答用户问的点，不扩展无关背景。
+- 不使用复杂表格。
+- 每节最多 5 条。
+- 关键代码最多列 5 个文件/方法，必须引用实际文件路径。
+- 实现链路最多 5 步。
+- 区分“代码已确认”和“推测”。
+- 如果证据不足，只说明缺失的关键线索，不展开长篇假设。
+- 没有日志内容时，不要说缺少日志，直接按代码分析。
+${troubleshootingRule}
 
-要求：
+推荐结构：
+## 结论
+## 关键代码
+## 实现链路
+## 依据与不确定项
+
+硬性要求：
 - 没有日志内容时，不要说缺少日志，直接按代码分析。
 - 必须引用实际文件路径。
-- 区分已从代码确认的事实与基于上下文的推测。
-- 输出 Markdown，但避免复杂表格，优先使用清晰列表。`;
+- 不要输出与问题无关的模块介绍。`;
 }
 
 export function getCursorApiKey(model?: AIModel): string | undefined {
