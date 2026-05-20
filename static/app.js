@@ -550,6 +550,7 @@ async function runAnalysis() {
       log_text: state.logAttachment.text,
       conversation_context: conversationContext,
       chat_session_id: state.chatSessionId,
+      output_mode: $("outputMode").value,
     }, {
       onStatus: (message) => {
         if (message) $("analysisResult").textContent = message;
@@ -638,6 +639,10 @@ $("analysisRepos").addEventListener("change", () => {
   resetChatSession();
   renderChatContext();
 });
+$("outputMode").addEventListener("change", () => {
+  resetChatSession();
+  renderChatContext();
+});
 $("saveProject").addEventListener("click", () => saveProject().catch(alertError));
 $("cancelEditProject").addEventListener("click", clearProjectForm);
 $("saveGitlabToken").addEventListener("click", () => saveGitlabToken().catch(alertError));
@@ -703,5 +708,16 @@ $("taskList").addEventListener("click", (event) => {
 function alertError(error) {
   alert(error.message || error);
 }
+
+const renderChatContextBase = renderChatContext;
+renderChatContext = function renderChatContextWithOutputMode() {
+  renderChatContextBase();
+  const context = $("chatContext");
+  if (!context || !state.projects.length) return;
+  const outputModeName = $("outputMode")?.value === "non_developer" ? "非研发模式" : "研发模式";
+  if (!context.textContent.includes(outputModeName)) {
+    context.textContent = `${context.textContent} · ${outputModeName}`;
+  }
+};
 
 loadAll().catch(alertError);

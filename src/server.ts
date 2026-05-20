@@ -7,7 +7,7 @@ import dotenv from "dotenv";
 import Fastify, { type FastifyReply } from "fastify";
 import { db, boolToInt, getSetting, initDb, normalizeRow, normalizeRows, nowIso, setSetting } from "./db.js";
 import { STATIC_DIR, UPLOAD_DIR } from "./paths.js";
-import { inferAnalysisType, analyzeWithModel } from "./services/ai.js";
+import { inferAnalysisType, analyzeWithModel, type OutputMode } from "./services/ai.js";
 import { searchCode, syncRepo } from "./services/code.js";
 import { syncCursorModels } from "./services/cursor-models.js";
 import type { AIModel, AnalysisTask, GitRepo, Project, ProjectWithReposInput, RepoSlotInput } from "./types.js";
@@ -281,6 +281,7 @@ app.post("/api/analyze", async (request, reply) => {
     log_text?: string;
     conversation_context?: string;
     chat_session_id?: string;
+    output_mode?: OutputMode;
   };
   if (!payload.repo_ids?.length) return badRequest(reply, "请至少选择一个仓库");
   const project = getProject(payload.project_id);
@@ -294,9 +295,10 @@ app.post("/api/analyze", async (request, reply) => {
   const logText = payload.log_text ?? "";
   const conversationContext = payload.conversation_context ?? "";
   const chatSessionId = payload.chat_session_id ?? "";
+  const outputMode = normalizeOutputMode(payload.output_mode);
   const chunks = searchCode(repos.map((repo) => repo.id), `${question}\n${conversationContext}\n${logText}`);
   const analysisType = payload.analysis_type || inferAnalysisType(question, logText);
-  const result = await analyzeWithModel(model, question, analysisType, chunks, logText, repos, conversationContext, chatSessionId);
+  const result = await analyzeWithModel(model, question, analysisType, chunks, logText, repos, conversationContext, chatSessionId, outputMode);
 
   const insertResult = db.prepare(`
     INSERT INTO analysis_tasks(project_id, model_id, analysis_type, question, log_text, selected_repo_ids, status, result, created_at)
@@ -316,6 +318,7 @@ app.post("/api/analyze/stream", async (request, reply) => {
     log_text?: string;
     conversation_context?: string;
     chat_session_id?: string;
+    output_mode?: OutputMode;
   };
 
   reply.raw.writeHead(200, {
@@ -343,11 +346,12 @@ app.post("/api/analyze/stream", async (request, reply) => {
     const logText = payload.log_text ?? "";
     const conversationContext = payload.conversation_context ?? "";
     const chatSessionId = payload.chat_session_id ?? "";
+    const outputMode = normalizeOutputMode(payload.output_mode);
     const chunks = searchCode(repos.map((repo) => repo.id), `${question}\n${conversationContext}\n${logText}`);
     const analysisType = payload.analysis_type || inferAnalysisType(question, logText);
 
     send("status", { message: "Agent 正在分析代码" });
-    const result = await analyzeWithModel(model, question, analysisType, chunks, logText, repos, conversationContext, chatSessionId, {
+    const result = await analyzeWithModel(model, question, analysisType, chunks, logText, repos, conversationContext, chatSessionId, outputMode, {
       onStatus: (message) => send("status", { message }),
       onDelta: (text) => send("delta", { text }),
     });
@@ -436,6 +440,10 @@ function publicModel(model: AIModel): Omit<AIModel, "api_key" | "base_url"> & { 
     base_url: "",
     configured,
   };
+}
+
+function normalizeOutputMode(mode?: string): OutputMode {
+  return mode === "non_developer" ? "non_developer" : "developer";
 }
 
 function normalizeProjectName(name = ""): string {

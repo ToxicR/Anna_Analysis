@@ -8,6 +8,8 @@ export interface AnalysisStreamCallbacks {
   onDelta?: (text: string) => void;
 }
 
+export type OutputMode = "developer" | "non_developer";
+
 interface CursorSession {
   agentId: string;
   agent: SDKAgent;
@@ -40,6 +42,7 @@ export async function analyzeWithModel(
   repos: GitRepo[],
   conversationContext = "",
   chatSessionId = "",
+  outputMode: OutputMode = "developer",
   stream?: AnalysisStreamCallbacks,
 ): Promise<string> {
   if (!model || !model.model_name) {
@@ -48,7 +51,7 @@ export async function analyzeWithModel(
     return result;
   }
 
-  return analyzeWithCursor(model, question, analysisType, chunks, logText, repos, conversationContext, chatSessionId, stream);
+  return analyzeWithCursor(model, question, analysisType, chunks, logText, repos, conversationContext, chatSessionId, outputMode, stream);
 }
 
 async function analyzeWithCursor(
@@ -60,6 +63,7 @@ async function analyzeWithCursor(
   repos: GitRepo[],
   conversationContext: string,
   chatSessionId: string,
+  outputMode: OutputMode,
   stream?: AnalysisStreamCallbacks,
 ): Promise<string> {
   const cwd = repos.map((repo) => repo.local_path).filter(Boolean);
@@ -67,11 +71,11 @@ async function analyzeWithCursor(
     throw new Error("未找到本地仓库路径，请先同步代码后再分析");
   }
 
-  const sessionKey = buildSessionKey(chatSessionId, model, repos, cwd);
+  const sessionKey = buildSessionKey(chatSessionId, outputMode, model, repos, cwd);
   const agent = await getOrCreateCursorAgent(sessionKey, model, cwd, stream);
 
   try {
-    const run = await agent.send(buildCursorPrompt(question, analysisType, chunks, logText, repos, conversationContext), {
+    const run = await agent.send(buildCursorPrompt(question, analysisType, chunks, logText, repos, conversationContext, outputMode), {
       local: { force: true },
     });
 
@@ -137,12 +141,12 @@ async function getOrCreateCursorAgent(
   return agent;
 }
 
-function buildSessionKey(chatSessionId: string, model: AIModel, repos: GitRepo[], cwd: string[]): string {
+function buildSessionKey(chatSessionId: string, outputMode: OutputMode, model: AIModel, repos: GitRepo[], cwd: string[]): string {
   const repoKey = repos
     .map((repo) => `${repo.id}:${repo.branch}:${repo.local_path}`)
     .sort()
     .join("|");
-  return [chatSessionId || "default", model.id, model.model_name, repoKey, cwd.join("|")].join("::");
+  return [chatSessionId || "default", outputMode, model.id, model.model_name, repoKey, cwd.join("|")].join("::");
 }
 
 function cleanupExpiredCursorSessions(): void {
@@ -194,6 +198,7 @@ function buildCursorPrompt(
   logText: string,
   repos: GitRepo[],
   conversationContext: string,
+  outputMode: OutputMode,
 ): string {
   const repoList = repos.map((repo) => `- ${repo.name}: ${repo.local_path} (${repo.branch})`).join("\n");
   const logSection = logText.trim() ? `\n日志内容：\n${logText.slice(0, 12000)}\n` : "";
@@ -213,9 +218,23 @@ function buildCursorPrompt(
     analysisType === "incident"
       ? "- 如果是问题排查，最后给“下一步排查”，最多 3 条。"
       : "- 不输出“下一步建议”或泛泛排查建议，除非用户明确要求。";
+  const outputModeRule =
+    outputMode === "non_developer"
+      ? `输出模式：非研发模式
+- 面向产品、测试、运营、项目经理等非研发人员。
+- 尽量少输出代码；默认不贴代码块，除非用户明确要求。
+- 可以保留必要的文件名或接口名作为证据，但不要展开方法实现、类结构、调用栈细节。
+- 用“现象、可能原因、影响范围、验证办法、处理建议”来组织语言。
+- 术语要解释成人能理解的话，例如把空指针说成“程序拿到的是空数据却继续使用”，把超时说成“请求在规定时间内没有返回”。
+- 结论要更直接，避免长篇技术推导。`
+      : `输出模式：研发模式
+- 面向研发人员，可以输出关键文件、方法、字段、接口、调用链和必要代码片段。
+- 代码片段仍需克制，只贴能证明结论的最小片段。
+- 可以使用准确技术术语，但必须区分事实和推测。`;
 
   return `你是 Anna Analysis 的代码分析 Agent。请只读分析代码，不要修改文件、不要提交代码、不要执行破坏性命令。
 分析类型：${analysisType}
+${outputModeRule}
 
 参与分析的仓库：
 ${repoList}
