@@ -11,7 +11,7 @@ export interface AnalysisStreamCallbacks {
   onDelta?: (text: string) => void;
 }
 
-export type OutputMode = "developer" | "non_developer";
+export type OutputMode = "auto" | "developer" | "non_developer";
 export type AttachmentImage = { url: string };
 
 interface CursorSession {
@@ -47,7 +47,7 @@ export async function analyzeWithModel(
   repos: GitRepo[],
   conversationContext = "",
   chatSessionId = "",
-  outputMode: OutputMode = "non_developer",
+  outputMode: OutputMode = "auto",
   attachmentImages: AttachmentImage[] = [],
   stream?: AnalysisStreamCallbacks,
 ): Promise<string> {
@@ -81,9 +81,9 @@ async function analyzeWithCursor(
   }
 
   const sessionKey = buildSessionKey(chatSessionId, outputMode, model, repos, cwd);
-  const agent = await getOrCreateCursorAgent(sessionKey, model, cwd, stream);
 
-  try {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const agent = await getOrCreateCursorAgent(sessionKey, model, cwd, stream);
     const prompt = buildCursorPrompt(question, analysisType, chunks, logText, repos, conversationContext, outputMode);
     const message: string | SDKUserMessage = attachmentImages.length ? { text: prompt, images: attachmentImages } : prompt;
     const run = await agent.send(message, {
@@ -109,7 +109,12 @@ async function analyzeWithCursor(
       const result = await run.wait();
       if (result.status !== "finished") {
         const error = formatRunFailure(result.status, statusMessages);
-        writeServerLog("cursor_run_failed", { error, result, statusMessages, model: model.model_name, cwd, hasAttachments });
+        writeServerLog("cursor_run_failed", { error, result, statusMessages, model: model.model_name, cwd, hasAttachments, attempt });
+        closeCursorSession(sessionKey);
+        if (attempt === 0 && !accumulated.trim()) {
+          stream.onStatus?.("Agent 首次分析失败，正在重建会话后重试...");
+          continue;
+        }
         throw new Error(error);
       }
       const finalText = result.result?.trim() || accumulated.trim() || "Agent 未返回分析内容。";
@@ -121,15 +126,15 @@ async function analyzeWithCursor(
     const result = await run.wait();
     if (result.status !== "finished") {
       const error = formatRunFailure(result.status);
-      writeServerLog("cursor_run_failed", { error, result, model: model.model_name, cwd, hasAttachments });
+      writeServerLog("cursor_run_failed", { error, result, model: model.model_name, cwd, hasAttachments, attempt });
+      closeCursorSession(sessionKey);
+      if (attempt === 0) continue;
       throw new Error(error);
     }
     return result.result?.trim() || "Agent 未返回分析内容。";
-  } finally {
-    const session = cursorSessions.get(sessionKey);
-    if (session) session.updatedAt = Date.now();
-    cleanupExpiredCursorSessions();
   }
+
+  throw new Error("Agent 分析失败，重试后仍未完成。");
 }
 
 function writeServerLog(event: string, payload: Record<string, unknown>): void {
@@ -183,6 +188,13 @@ function cleanupExpiredCursorSessions(): void {
     void session.agent.close();
     cursorSessions.delete(key);
   }
+}
+
+function closeCursorSession(sessionKey: string): void {
+  const session = cursorSessions.get(sessionKey);
+  if (!session) return;
+  void session.agent.close();
+  cursorSessions.delete(sessionKey);
 }
 
 function streamMessageToText(message: SDKMessage): { status?: string; text?: string } {
@@ -255,15 +267,21 @@ function buildCursorPrompt(
       ? "- 如果是问题排查，最后给“下一步排查”，最多 3 条。"
       : "- 不输出“下一步建议”或泛泛排查建议，除非用户明确要求。";
   const outputModeRule =
-    outputMode === "non_developer"
-      ? `输出模式：非研发模式
+    outputMode === "auto"
+      ? `输出模式：自动模式
+- 根据用户问题自行判断输出深度。
+- 如果用户问“怎么实现、调用链、源码、接口、字段、类、方法”等研发问题，按研发模式输出。
+- 如果用户问“为什么失败、现象是什么、影响是什么、怎么验证、怎么处理”等排查或业务问题，按非研发模式输出。
+- 如果问题不明确，优先使用非研发人员也能看懂的表达，少贴代码；只在代码能证明结论时引用少量路径、方法或字段。`
+      : outputMode === "non_developer"
+        ? `输出模式：非研发模式
 - 面向产品、测试、运营、项目经理等非研发人员。
 - 尽量少输出代码；默认不贴代码块，除非用户明确要求。
 - 可以保留必要的文件名或接口名作为证据，但不要展开方法实现、类结构、调用栈细节。
 - 用“现象、可能原因、影响范围、验证办法、处理建议”来组织语言。
 - 术语要解释成人能理解的话，例如把空指针说成“程序拿到的是空数据却继续使用”，把超时说成“请求在规定时间内没有返回”。
 - 结论要更直接，避免长篇技术推导。`
-      : `输出模式：研发模式
+        : `输出模式：研发模式
 - 面向研发人员，可以输出关键文件、方法、字段、接口、调用链和必要代码片段。
 - 代码片段仍需克制，只贴能证明结论的最小片段。
 - 可以使用准确技术术语，但必须区分事实和推测。`;

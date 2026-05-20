@@ -476,7 +476,8 @@ function publicModel(model: AIModel): Omit<AIModel, "api_key" | "base_url"> & { 
 }
 
 function normalizeOutputMode(mode?: string): OutputMode {
-  return mode === "developer" ? "developer" : "non_developer";
+  if (mode === "developer" || mode === "non_developer") return mode;
+  return "auto";
 }
 
 function normalizeAttachmentImages(images?: { url: string }[]): { url: string }[] {

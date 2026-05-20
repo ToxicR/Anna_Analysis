@@ -736,7 +736,8 @@ renderChatContext = function renderChatContextWithOutputMode() {
   renderChatContextBase();
   const context = $("chatContext");
   if (!context || !state.projects.length) return;
-  const outputModeName = $("outputMode")?.value === "non_developer" ? "非研发模式" : "研发模式";
+  const mode = $("outputMode")?.value;
+  const outputModeName = mode === "developer" ? "研发模式" : mode === "non_developer" ? "非研发模式" : "Auto";
   if (!context.textContent.includes(outputModeName)) {
     context.textContent = `${context.textContent} · ${outputModeName}`;
   }
