@@ -1,6 +1,8 @@
+import fs from "node:fs";
+import path from "node:path";
 import { Agent, type SDKAgent, type SDKImage, type SDKMessage, type SDKUserMessage } from "@cursor/sdk";
 import { db, getSetting, setSetting } from "../db.js";
-import { UPLOAD_DIR } from "../paths.js";
+import { DATA_DIR, UPLOAD_DIR } from "../paths.js";
 import type { AIModel, CodeChunk, GitRepo } from "../types.js";
 import { formatContext } from "./code.js";
 
@@ -20,6 +22,7 @@ interface CursorSession {
 
 const cursorSessions = new Map<string, CursorSession>();
 const SESSION_TTL_MS = 1000 * 60 * 60 * 3;
+const SERVER_LOG_PATH = path.join(DATA_DIR, "server.log");
 
 export function inferAnalysisType(question: string, logText: string): string {
   const text = `${question}\n${logText}`.toLowerCase();
@@ -70,7 +73,9 @@ async function analyzeWithCursor(
   attachmentImages: AttachmentImage[],
   stream?: AnalysisStreamCallbacks,
 ): Promise<string> {
-  const cwd = [...repos.map((repo) => repo.local_path).filter(Boolean), UPLOAD_DIR];
+  const repoCwd = repos.map((repo) => repo.local_path).filter(Boolean);
+  const hasAttachments = Boolean(logText.trim() || attachmentImages.length);
+  const cwd = hasAttachments ? [...repoCwd, UPLOAD_DIR] : repoCwd;
   if (!cwd.length) {
     throw new Error("未找到本地仓库路径，请先同步代码后再分析");
   }
@@ -103,7 +108,9 @@ async function analyzeWithCursor(
 
       const result = await run.wait();
       if (result.status !== "finished") {
-        throw new Error(formatRunFailure(result.status, statusMessages));
+        const error = formatRunFailure(result.status, statusMessages);
+        writeServerLog("cursor_run_failed", { error, result, statusMessages, model: model.model_name, cwd, hasAttachments });
+        throw new Error(error);
       }
       const finalText = result.result?.trim() || accumulated.trim() || "Agent 未返回分析内容。";
       const finalDelta = finalText.startsWith(accumulated) ? finalText.slice(accumulated.length) : "";
@@ -113,13 +120,23 @@ async function analyzeWithCursor(
 
     const result = await run.wait();
     if (result.status !== "finished") {
-      throw new Error(formatRunFailure(result.status));
+      const error = formatRunFailure(result.status);
+      writeServerLog("cursor_run_failed", { error, result, model: model.model_name, cwd, hasAttachments });
+      throw new Error(error);
     }
     return result.result?.trim() || "Agent 未返回分析内容。";
   } finally {
     const session = cursorSessions.get(sessionKey);
     if (session) session.updatedAt = Date.now();
     cleanupExpiredCursorSessions();
+  }
+}
+
+function writeServerLog(event: string, payload: Record<string, unknown>): void {
+  try {
+    fs.appendFileSync(SERVER_LOG_PATH, `${JSON.stringify({ time: new Date().toISOString(), event, ...payload })}\n`, "utf8");
+  } catch {
+    // Logging must never break the analysis response path.
   }
 }
 
