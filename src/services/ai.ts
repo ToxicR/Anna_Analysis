@@ -58,7 +58,7 @@ async function analyzeWithCursor(
     name: "Anna Analysis",
     local: {
       cwd: cwd.length === 1 ? cwd[0] : cwd,
-      sandboxOptions: { enabled: true },
+      sandboxOptions: { enabled: false },
       settingSources: ["project"],
     },
   });
