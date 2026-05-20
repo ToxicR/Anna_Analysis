@@ -462,7 +462,7 @@ async function streamAnalysis(payload, handlers) {
     for (const part of parts) {
       const event = parseSseEvent(part);
       if (!event) continue;
-      if (event.event === "status") handlers.onStatus?.(event.data.message || "");
+      if (event.event === "status") handlers.onStatus?.(normalizeStatusText(event.data.message || ""));
       if (event.event === "delta") handlers.onDelta?.(event.data.text || "");
       if (event.event === "result") finalTask = event.data;
       if (event.event === "error") throw new Error(event.data.detail || "分析失败");
@@ -475,6 +475,10 @@ async function streamAnalysis(payload, handlers) {
     if (event?.event === "error") throw new Error(event.data.detail || "分析失败");
   }
   return finalTask;
+}
+
+function normalizeStatusText(text) {
+  return String(text || "").replace(/\s+/g, " ").trim();
 }
 
 function parseSseEvent(raw) {

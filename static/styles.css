@@ -321,6 +321,7 @@ p {
 }
 
 .bubble {
+  width: 100%;
   border: 1px solid var(--line);
   border-radius: 14px;
   padding: 13px 14px;
@@ -336,8 +337,9 @@ p {
 }
 
 .message-body {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
+  white-space: normal;
+  overflow-wrap: break-word;
+  word-break: normal;
 }
 
 .message-body p {
