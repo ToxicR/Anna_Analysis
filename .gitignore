@@ -4,3 +4,6 @@ __pycache__/
 data/
 uvicorn.*.log
 e8c0f698-4882-4557-a8fb-70eaf650748f.png
+node_modules/
+dist/
+.env

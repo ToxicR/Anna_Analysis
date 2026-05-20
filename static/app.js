@@ -259,6 +259,7 @@ async function saveModel() {
     }),
   });
   $("modelName").value = "";
+  $("modelProvider").value = "cursor";
   $("modelBaseUrl").value = "";
   $("modelApiKey").value = "";
   $("modelId").value = "";
