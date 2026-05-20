@@ -9,6 +9,7 @@ const state = {
   attachmentText: "",
   chatTurns: [],
   chatSessionId: createChatSessionId(),
+  syncedRepoKeyBySession: {},
 };
 
 const $ = (id) => document.getElementById(id);
@@ -68,7 +69,7 @@ function render() {
 
 function renderSelectors() {
   $("analysisProject").innerHTML = optionList(state.projects, (project) => project.name);
-  $("analysisModel").innerHTML = `<option value="">Auto</option>${optionList(state.models.filter((model) => model.enabled), (model) => model.is_default ? `${model.name}（默认）` : model.name)}`;
+  $("analysisModel").innerHTML = optionList(state.models.filter((model) => model.enabled), (model) => model.is_default ? `${model.name}（默认）` : model.name);
   renderAnalysisRepos();
 }
 
@@ -458,12 +459,20 @@ function formatInline(text) {
 }
 
 async function refreshSelectedRepos(repoIds, pending) {
+  const repoKey = [...repoIds].sort((a, b) => a - b).join(",");
+  if (state.syncedRepoKeyBySession[state.chatSessionId] === repoKey) {
+    renderMessageBody(pending.querySelector(".message-body"), "本轮对话已获取过最新代码，正在继续分析...");
+    $("analysisResult").textContent = "正在分析...";
+    return { skipped: true };
+  }
   renderMessageBody(pending.querySelector(".message-body"), "正在获取所选仓库的最新代码...");
   $("analysisResult").textContent = "正在获取最新代码...";
-  return api("/api/repos/sync", {
+  const result = await api("/api/repos/sync", {
     method: "POST",
     body: JSON.stringify({ repo_ids: repoIds }),
   });
+  state.syncedRepoKeyBySession[state.chatSessionId] = repoKey;
+  return result;
 }
 
 async function streamAnalysis(payload, handlers) {
@@ -630,12 +639,14 @@ function clearChat() {
     </article>
   `;
   state.chatTurns = [];
+  delete state.syncedRepoKeyBySession[state.chatSessionId];
   state.chatSessionId = createChatSessionId();
   $("analysisResult").textContent = "准备就绪";
 }
 
 function resetChatSession() {
   state.chatTurns = [];
+  delete state.syncedRepoKeyBySession[state.chatSessionId];
   state.chatSessionId = createChatSessionId();
 }
 

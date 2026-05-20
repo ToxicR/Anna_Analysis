@@ -28,9 +28,10 @@ export async function syncCursorModels(): Promise<AIModel[]> {
     LIMIT 1
   `).get() as { model_name: string } | undefined;
   const availableIds = new Set(models.map((model) => model.id));
-  const defaultModelId = existingDefault && availableIds.has(existingDefault.model_name)
+  const preferredDefaultModelId = chooseDefaultModel(models);
+  const defaultModelId = existingDefault && availableIds.has(existingDefault.model_name) && existingDefault.model_name === preferredDefaultModelId
     ? existingDefault.model_name
-    : chooseDefaultModel(models);
+    : preferredDefaultModelId;
 
   const upsert = db.prepare(`
     INSERT INTO ai_models(name, provider, base_url, api_key, model_name, enabled, is_default, created_at)
@@ -75,6 +76,8 @@ function ensureFallbackModel(): void {
 }
 
 function chooseDefaultModel(models: CursorModelItem[]): string {
+  const auto = models.find((model) => model.id === "default" || (model.displayName || "").toLowerCase() === "auto");
+  if (auto) return auto.id;
   const composer25 = models.find((model) => model.id === "composer-2.5");
   if (composer25) return composer25.id;
   const aliasMatch = models.find((model) => model.aliases?.includes("composer-latest"));
