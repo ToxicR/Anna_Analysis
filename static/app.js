@@ -6,6 +6,7 @@ const state = {
   settings: {},
   editingProjectId: null,
   logAttachment: { name: "", text: "" },
+  chatTurns: [],
 };
 
 const $ = (id) => document.getElementById(id);
@@ -277,6 +278,22 @@ function appendMessage(role, body, meta) {
   return article;
 }
 
+function rememberTurn(role, body, meta) {
+  state.chatTurns.push({
+    role,
+    meta: String(meta || ""),
+    body: String(body || "").slice(0, 4000),
+  });
+  state.chatTurns = state.chatTurns.slice(-8);
+}
+
+function conversationContextForNextTurn() {
+  return state.chatTurns
+    .map((turn) => `${turn.role === "user" ? "用户" : "Agent"}（${turn.meta}）：\n${turn.body}`)
+    .join("\n\n---\n\n")
+    .slice(-12000);
+}
+
 function renderMessageBody(element, markdown) {
   element.innerHTML = markdownToHtml(normalizeMarkdownWhitespace(markdown));
 }
@@ -507,7 +524,10 @@ async function runAnalysis() {
 
   const project = state.projects.find((item) => item.id === Number($("analysisProject").value));
   const meta = `${project?.name || "未选择项目"} · 自动判断分析方式${state.logAttachment.name ? ` · 附件：${state.logAttachment.name}` : ""}`;
-  appendMessage("user", question || `分析日志文件：${state.logAttachment.name}`, meta);
+  const userMessage = question || `分析日志文件：${state.logAttachment.name}`;
+  const conversationContext = conversationContextForNextTurn();
+  appendMessage("user", userMessage, meta);
+  rememberTurn("user", userMessage, meta);
   $("question").value = "";
   const pending = appendMessage("assistant", "准备分析...", "Anna Analysis");
 
@@ -523,6 +543,7 @@ async function runAnalysis() {
       model_id: $("analysisModel").value ? Number($("analysisModel").value) : null,
       question,
       log_text: state.logAttachment.text,
+      conversation_context: conversationContext,
     }, {
       onStatus: (message) => {
         if (message) $("analysisResult").textContent = message;
@@ -534,6 +555,7 @@ async function runAnalysis() {
       },
     });
     if (task?.result) renderMessageBody(pending.querySelector(".message-body"), task.result);
+    rememberTurn("assistant", task?.result || streamedText, "Anna Analysis");
     $("analysisResult").textContent = "分析完成";
     await loadAll();
   } catch (error) {
@@ -578,6 +600,7 @@ function clearChat() {
       </div>
     </article>
   `;
+  state.chatTurns = [];
   $("analysisResult").textContent = "准备就绪";
 }
 

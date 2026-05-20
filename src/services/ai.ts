@@ -29,6 +29,7 @@ export async function analyzeWithModel(
   chunks: CodeChunk[],
   logText: string,
   repos: GitRepo[],
+  conversationContext = "",
   stream?: AnalysisStreamCallbacks,
 ): Promise<string> {
   if (!model || !model.model_name) {
@@ -37,7 +38,7 @@ export async function analyzeWithModel(
     return result;
   }
 
-  return analyzeWithCursor(model, question, analysisType, chunks, logText, repos, stream);
+  return analyzeWithCursor(model, question, analysisType, chunks, logText, repos, conversationContext, stream);
 }
 
 async function analyzeWithCursor(
@@ -47,6 +48,7 @@ async function analyzeWithCursor(
   chunks: CodeChunk[],
   logText: string,
   repos: GitRepo[],
+  conversationContext: string,
   stream?: AnalysisStreamCallbacks,
 ): Promise<string> {
   const cwd = repos.map((repo) => repo.local_path).filter(Boolean);
@@ -66,7 +68,7 @@ async function analyzeWithCursor(
   });
 
   try {
-    const run = await agent.send(buildCursorPrompt(question, analysisType, chunks, logText, repos), { local: { force: true } });
+    const run = await agent.send(buildCursorPrompt(question, analysisType, chunks, logText, repos, conversationContext), { local: { force: true } });
 
     if (stream) {
       let accumulated = "";
@@ -139,9 +141,11 @@ function buildCursorPrompt(
   chunks: CodeChunk[],
   logText: string,
   repos: GitRepo[],
+  conversationContext: string,
 ): string {
   const repoList = repos.map((repo) => `- ${repo.name}: ${repo.local_path} (${repo.branch})`).join("\n");
   const logSection = logText.trim() ? `\n日志内容：\n${logText.slice(0, 12000)}\n` : "";
+  const conversationSection = conversationContext.trim() ? `\n本轮对话上下文（用于理解“继续/上一步/下一步/它/这个问题”等指代）：\n${conversationContext.slice(-12000)}\n` : "";
   const troubleshootingRule = analysisType === "incident"
     ? "- 如果是问题排查，最后给“下一步排查”，最多 3 条。"
     : "- 不输出“下一步建议”或泛泛排查建议，除非用户明确要求。";
@@ -154,6 +158,7 @@ ${repoList}
 
 用户问题：
 ${question}
+${conversationSection}
 ${logSection}
 当前系统本地检索到的候选代码片段：
 ${formatContext(chunks)}

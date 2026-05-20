@@ -279,6 +279,7 @@ app.post("/api/analyze", async (request, reply) => {
     analysis_type?: string;
     question?: string;
     log_text?: string;
+    conversation_context?: string;
   };
   if (!payload.repo_ids?.length) return badRequest(reply, "请至少选择一个仓库");
   const project = getProject(payload.project_id);
@@ -290,9 +291,10 @@ app.post("/api/analyze", async (request, reply) => {
   const model = payload.model_id ? getModel(payload.model_id) : getDefaultModel();
   const question = payload.question ?? "";
   const logText = payload.log_text ?? "";
-  const chunks = searchCode(repos.map((repo) => repo.id), `${question}\n${logText}`);
+  const conversationContext = payload.conversation_context ?? "";
+  const chunks = searchCode(repos.map((repo) => repo.id), `${question}\n${conversationContext}\n${logText}`);
   const analysisType = payload.analysis_type || inferAnalysisType(question, logText);
-  const result = await analyzeWithModel(model, question, analysisType, chunks, logText, repos);
+  const result = await analyzeWithModel(model, question, analysisType, chunks, logText, repos, conversationContext);
 
   const insertResult = db.prepare(`
     INSERT INTO analysis_tasks(project_id, model_id, analysis_type, question, log_text, selected_repo_ids, status, result, created_at)
@@ -310,6 +312,7 @@ app.post("/api/analyze/stream", async (request, reply) => {
     analysis_type?: string;
     question?: string;
     log_text?: string;
+    conversation_context?: string;
   };
 
   reply.raw.writeHead(200, {
@@ -335,11 +338,12 @@ app.post("/api/analyze/stream", async (request, reply) => {
     const model = payload.model_id ? getModel(payload.model_id) : getDefaultModel();
     const question = payload.question ?? "";
     const logText = payload.log_text ?? "";
-    const chunks = searchCode(repos.map((repo) => repo.id), `${question}\n${logText}`);
+    const conversationContext = payload.conversation_context ?? "";
+    const chunks = searchCode(repos.map((repo) => repo.id), `${question}\n${conversationContext}\n${logText}`);
     const analysisType = payload.analysis_type || inferAnalysisType(question, logText);
 
     send("status", { message: "Agent 正在分析代码" });
-    const result = await analyzeWithModel(model, question, analysisType, chunks, logText, repos, {
+    const result = await analyzeWithModel(model, question, analysisType, chunks, logText, repos, conversationContext, {
       onStatus: (message) => send("status", { message }),
       onDelta: (text) => send("delta", { text }),
     });
