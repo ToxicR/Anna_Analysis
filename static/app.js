@@ -484,7 +484,7 @@ async function streamAnalysis(payload, handlers) {
 }
 
 function normalizeStatusText(text) {
-  return String(text || "").replace(/\s+/g, " ").trim();
+  return String(text || "").replace(/\s+/g, " ").replaceAll("Cursor Agent", "Agent").trim();
 }
 
 function parseSseEvent(raw) {

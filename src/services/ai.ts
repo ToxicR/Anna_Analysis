@@ -82,9 +82,9 @@ async function analyzeWithCursor(
 
       const result = await run.wait();
       if (result.status !== "finished") {
-        throw new Error(`Cursor 分析未完成，状态：${result.status}`);
+        throw new Error(`Agent 分析未完成，状态：${result.status}`);
       }
-      const finalText = result.result?.trim() || accumulated.trim() || "Cursor Agent 未返回分析内容。";
+      const finalText = result.result?.trim() || accumulated.trim() || "Agent 未返回分析内容。";
       const finalDelta = finalText.startsWith(accumulated) ? finalText.slice(accumulated.length) : "";
       if (finalDelta) stream.onDelta?.(finalDelta);
       return finalText;
@@ -92,9 +92,9 @@ async function analyzeWithCursor(
 
     const result = await run.wait();
     if (result.status !== "finished") {
-      throw new Error(`Cursor 分析未完成，状态：${result.status}`);
+      throw new Error(`Agent 分析未完成，状态：${result.status}`);
     }
-    return result.result?.trim() || "Cursor Agent 未返回分析内容。";
+    return result.result?.trim() || "Agent 未返回分析内容。";
   } finally {
     agent.close();
   }
@@ -110,14 +110,14 @@ function streamMessageToText(message: SDKMessage): { status?: string; text?: str
     };
   }
   if (message.type === "thinking" && message.text) {
-    return { status: "Cursor Agent 正在思考..." };
+    return { status: "Agent 正在思考..." };
   }
   if (message.type === "tool_call") {
     const action = message.status === "running" ? "正在使用工具" : message.status === "completed" ? "工具执行完成" : "工具执行失败";
     return { status: `${action}：${message.name}` };
   }
   if (message.type === "status") {
-    return { status: message.message || `Cursor Agent 状态：${message.status}` };
+    return { status: message.message || `Agent 状态：${message.status}` };
   }
   if (message.type === "task" && message.text) {
     return { status: message.text };
@@ -250,7 +250,7 @@ function localAnalysis(question: string, analysisType: string, chunks: CodeChunk
   lines.push(
     "",
     "## 下一步建议",
-    "- 配置 Cursor 模型后，可以让 Cursor Agent 直接在仓库目录中继续阅读代码并给出完整分析。",
+    "- 配置模型后，可以让 Agent 直接在仓库目录中继续阅读代码并给出完整分析。",
     "- 如果当前问题是功能实现分析，不需要上传日志；只有排查运行异常时才需要日志。",
   );
 

@@ -338,7 +338,7 @@ app.post("/api/analyze/stream", async (request, reply) => {
     const chunks = searchCode(repos.map((repo) => repo.id), `${question}\n${logText}`);
     const analysisType = payload.analysis_type || inferAnalysisType(question, logText);
 
-    send("status", { message: "Cursor Agent 正在分析代码" });
+    send("status", { message: "Agent 正在分析代码" });
     const result = await analyzeWithModel(model, question, analysisType, chunks, logText, repos, {
       onStatus: (message) => send("status", { message }),
       onDelta: (text) => send("delta", { text }),
