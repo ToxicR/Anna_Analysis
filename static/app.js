@@ -530,6 +530,12 @@ function attachmentNames() {
   return state.attachments.map((file) => file.file_name || file.name).filter(Boolean).join("、");
 }
 
+function attachmentImages() {
+  return state.attachments
+    .filter((file) => file.image_url)
+    .map((file) => ({ url: file.image_url }));
+}
+
 async function runAnalysis() {
   const repoIds = [...$("analysisRepos").querySelectorAll("input:checked")].map((input) => Number(input.value));
   const question = $("question").value.trim();
@@ -559,6 +565,7 @@ async function runAnalysis() {
       model_id: $("analysisModel").value ? Number($("analysisModel").value) : null,
       question,
       log_text: currentAttachmentText,
+      attachment_images: attachmentImages(),
       conversation_context: conversationContext,
       chat_session_id: state.chatSessionId,
       output_mode: $("outputMode").value,

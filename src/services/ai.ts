@@ -1,5 +1,6 @@
-import { Agent, type SDKAgent, type SDKMessage } from "@cursor/sdk";
+import { Agent, type SDKAgent, type SDKImage, type SDKMessage, type SDKUserMessage } from "@cursor/sdk";
 import { db, getSetting, setSetting } from "../db.js";
+import { UPLOAD_DIR } from "../paths.js";
 import type { AIModel, CodeChunk, GitRepo } from "../types.js";
 import { formatContext } from "./code.js";
 
@@ -9,6 +10,7 @@ export interface AnalysisStreamCallbacks {
 }
 
 export type OutputMode = "developer" | "non_developer";
+export type AttachmentImage = { url: string };
 
 interface CursorSession {
   agentId: string;
@@ -43,6 +45,7 @@ export async function analyzeWithModel(
   conversationContext = "",
   chatSessionId = "",
   outputMode: OutputMode = "non_developer",
+  attachmentImages: AttachmentImage[] = [],
   stream?: AnalysisStreamCallbacks,
 ): Promise<string> {
   if (!model || !model.model_name) {
@@ -51,7 +54,7 @@ export async function analyzeWithModel(
     return result;
   }
 
-  return analyzeWithCursor(model, question, analysisType, chunks, logText, repos, conversationContext, chatSessionId, outputMode, stream);
+  return analyzeWithCursor(model, question, analysisType, chunks, logText, repos, conversationContext, chatSessionId, outputMode, attachmentImages, stream);
 }
 
 async function analyzeWithCursor(
@@ -64,9 +67,10 @@ async function analyzeWithCursor(
   conversationContext: string,
   chatSessionId: string,
   outputMode: OutputMode,
+  attachmentImages: AttachmentImage[],
   stream?: AnalysisStreamCallbacks,
 ): Promise<string> {
-  const cwd = repos.map((repo) => repo.local_path).filter(Boolean);
+  const cwd = [...repos.map((repo) => repo.local_path).filter(Boolean), UPLOAD_DIR];
   if (!cwd.length) {
     throw new Error("未找到本地仓库路径，请先同步代码后再分析");
   }
@@ -75,7 +79,9 @@ async function analyzeWithCursor(
   const agent = await getOrCreateCursorAgent(sessionKey, model, cwd, stream);
 
   try {
-    const run = await agent.send(buildCursorPrompt(question, analysisType, chunks, logText, repos, conversationContext, outputMode), {
+    const prompt = buildCursorPrompt(question, analysisType, chunks, logText, repos, conversationContext, outputMode);
+    const message: string | SDKUserMessage = attachmentImages.length ? { text: prompt, images: attachmentImages } : prompt;
+    const run = await agent.send(message, {
       local: { force: true },
     });
 

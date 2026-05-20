@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import staticPlugin from "@fastify/static";
@@ -22,6 +23,7 @@ interface UploadedAttachment {
   path: string;
   size: number;
   text: string;
+  image_url?: string;
 }
 
 const app = Fastify({ logger: true, bodyLimit: 5 * 1024 * 1024 });
@@ -288,6 +290,7 @@ app.post("/api/analyze", async (request, reply) => {
     analysis_type?: string;
     question?: string;
     log_text?: string;
+    attachment_images?: { url: string }[];
     conversation_context?: string;
     chat_session_id?: string;
     output_mode?: OutputMode;
@@ -302,12 +305,13 @@ app.post("/api/analyze", async (request, reply) => {
   const model = payload.model_id ? getModel(payload.model_id) : getDefaultModel();
   const question = payload.question ?? "";
   const logText = payload.log_text ?? "";
+  const attachmentImages = normalizeAttachmentImages(payload.attachment_images);
   const conversationContext = payload.conversation_context ?? "";
   const chatSessionId = payload.chat_session_id ?? "";
   const outputMode = normalizeOutputMode(payload.output_mode);
   const chunks = searchCode(repos.map((repo) => repo.id), `${question}\n${conversationContext}\n${logText}`);
   const analysisType = payload.analysis_type || inferAnalysisType(question, logText);
-  const result = await analyzeWithModel(model, question, analysisType, chunks, logText, repos, conversationContext, chatSessionId, outputMode);
+  const result = await analyzeWithModel(model, question, analysisType, chunks, logText, repos, conversationContext, chatSessionId, outputMode, attachmentImages);
 
   const insertResult = db.prepare(`
     INSERT INTO analysis_tasks(project_id, model_id, analysis_type, question, log_text, selected_repo_ids, status, result, created_at)
@@ -325,6 +329,7 @@ app.post("/api/analyze/stream", async (request, reply) => {
     analysis_type?: string;
     question?: string;
     log_text?: string;
+    attachment_images?: { url: string }[];
     conversation_context?: string;
     chat_session_id?: string;
     output_mode?: OutputMode;
@@ -353,6 +358,7 @@ app.post("/api/analyze/stream", async (request, reply) => {
     const model = payload.model_id ? getModel(payload.model_id) : getDefaultModel();
     const question = payload.question ?? "";
     const logText = payload.log_text ?? "";
+    const attachmentImages = normalizeAttachmentImages(payload.attachment_images);
     const conversationContext = payload.conversation_context ?? "";
     const chatSessionId = payload.chat_session_id ?? "";
     const outputMode = normalizeOutputMode(payload.output_mode);
@@ -360,7 +366,7 @@ app.post("/api/analyze/stream", async (request, reply) => {
     const analysisType = payload.analysis_type || inferAnalysisType(question, logText);
 
     send("status", { message: "Agent 正在分析代码" });
-    const result = await analyzeWithModel(model, question, analysisType, chunks, logText, repos, conversationContext, chatSessionId, outputMode, {
+    const result = await analyzeWithModel(model, question, analysisType, chunks, logText, repos, conversationContext, chatSessionId, outputMode, attachmentImages, {
       onStatus: (message) => send("status", { message }),
       onDelta: (text) => send("delta", { text }),
     });
@@ -387,6 +393,7 @@ app.post("/api/analyze/upload-log", async (request, reply) => {
     const buffer = await file.toBuffer();
     fs.writeFileSync(filePath, buffer);
     const text = isTextAttachment(safeName, file.mimetype) ? buffer.toString("utf8").slice(0, 100_000) : "";
+    const imageUrl = file.mimetype.startsWith("image/") ? pathToFileURL(filePath).href : undefined;
     uploaded.push({
       file_name: safeName,
       stored_name: storedName,
@@ -394,6 +401,7 @@ app.post("/api/analyze/upload-log", async (request, reply) => {
       path: filePath,
       size: buffer.length,
       text,
+      image_url: imageUrl,
     });
   }
 
@@ -471,6 +479,12 @@ function normalizeOutputMode(mode?: string): OutputMode {
   return mode === "developer" ? "developer" : "non_developer";
 }
 
+function normalizeAttachmentImages(images?: { url: string }[]): { url: string }[] {
+  return Array.isArray(images)
+    ? images.filter((image) => typeof image.url === "string" && image.url.trim()).map((image) => ({ url: image.url.trim() }))
+    : [];
+}
+
 function isTextAttachment(fileName: string, mimeType: string): boolean {
   return (
     mimeType.startsWith("text/") ||
@@ -493,7 +507,7 @@ function formatAttachmentForPrompt(file: UploadedAttachment): string {
   }
 
   if (file.mime_type.startsWith("image/")) {
-    return `${header}\n这是图片附件。请结合图片中的界面、报错、图表或截图内容进行分析；如需要引用，请引用上面的本地路径。`;
+    return `${header}\n图片 URL：${file.image_url || file.path}\n这是图片附件，已作为图片输入发送给 Agent。请结合图片中的界面、报错、图表或截图内容进行分析。`;
   }
 
   return `${header}\n这是非文本附件。请优先根据文件名、类型和本地路径判断是否需要读取该文件。`;
