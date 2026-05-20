@@ -278,7 +278,13 @@ function appendMessage(role, body, meta) {
 }
 
 function renderMessageBody(element, markdown) {
-  element.innerHTML = markdownToHtml(markdown);
+  element.innerHTML = markdownToHtml(normalizeMarkdownWhitespace(markdown));
+}
+
+function normalizeMarkdownWhitespace(markdown) {
+  return String(markdown || "")
+    .replace(/([^\n])\n([^\n#\-*`\d|])/g, "$1$2")
+    .replace(/\n{3,}/g, "\n\n");
 }
 
 function markdownToHtml(markdown) {

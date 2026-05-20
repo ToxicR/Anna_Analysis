@@ -74,8 +74,8 @@ async function analyzeWithCursor(
         const update = streamMessageToText(message);
         if (update.status) stream.onStatus?.(update.status);
         if (update.text) {
-          const delta = toDelta(accumulated, update.text);
-          accumulated = update.text;
+          const delta = extractStreamDelta(accumulated, update.text);
+          accumulated += delta;
           if (delta) stream.onDelta?.(delta);
         }
       }
@@ -85,7 +85,7 @@ async function analyzeWithCursor(
         throw new Error(`Cursor 分析未完成，状态：${result.status}`);
       }
       const finalText = result.result?.trim() || accumulated.trim() || "Cursor Agent 未返回分析内容。";
-      const finalDelta = toDelta(accumulated, finalText);
+      const finalDelta = finalText.startsWith(accumulated) ? finalText.slice(accumulated.length) : "";
       if (finalDelta) stream.onDelta?.(finalDelta);
       return finalText;
     }
@@ -125,12 +125,12 @@ function streamMessageToText(message: SDKMessage): { status?: string; text?: str
   return {};
 }
 
-function toDelta(previous: string, next: string): string {
-  if (!next) return "";
-  if (!previous) return next;
-  if (next.startsWith(previous)) return next.slice(previous.length);
-  if (previous.includes(next)) return "";
-  return `\n\n${next}`;
+function extractStreamDelta(accumulated: string, incoming: string): string {
+  if (!incoming) return "";
+  if (!accumulated) return incoming;
+  if (incoming.startsWith(accumulated)) return incoming.slice(accumulated.length);
+  if (accumulated.endsWith(incoming) || accumulated.includes(incoming)) return "";
+  return incoming;
 }
 
 function buildCursorPrompt(
