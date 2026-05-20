@@ -75,6 +75,8 @@ function ensureFallbackModel(): void {
 }
 
 function chooseDefaultModel(models: CursorModelItem[]): string {
+  const composer25 = models.find((model) => model.id === "composer-2.5");
+  if (composer25) return composer25.id;
   const aliasMatch = models.find((model) => model.aliases?.includes("composer-latest"));
   if (aliasMatch) return aliasMatch.id;
   const composer2 = models.find((model) => model.id === "composer-2");
