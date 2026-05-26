@@ -76,14 +76,15 @@ function ensureFallbackModel(): void {
 }
 
 function chooseDefaultModel(models: CursorModelItem[]): string {
-  const auto = models.find((model) => model.id === "default" || (model.displayName || "").toLowerCase() === "auto");
-  if (auto) return auto.id;
   const composer25 = models.find((model) => model.id === "composer-2.5");
   if (composer25) return composer25.id;
-  const aliasMatch = models.find((model) => model.aliases?.includes("composer-latest"));
-  if (aliasMatch) return aliasMatch.id;
   const composer2 = models.find((model) => model.id === "composer-2");
   if (composer2) return composer2.id;
+  const aliasMatch = models.find((model) => model.aliases?.includes("composer-latest"));
+  if (aliasMatch) return aliasMatch.id;
   const composer = models.find((model) => model.id.toLowerCase().includes("composer"));
-  return composer?.id || models[0]!.id;
+  if (composer) return composer.id;
+  const auto = models.find((model) => model.id === "default" || (model.displayName || "").toLowerCase() === "auto");
+  if (auto) return auto.id;
+  return models[0]!.id;
 }

@@ -51,7 +51,34 @@ export interface AnalysisTask {
   selected_repo_ids: string;
   status: string;
   result: string;
+  agent_id?: string;
+  run_id?: string;
+  workspace_path?: string;
+  analysis_scope?: string;
   created_at: string;
+}
+
+export interface RepoValidationIssue {
+  repo_id: number;
+  repo_name: string;
+  level: "error" | "warning";
+  message: string;
+}
+
+export interface RepoValidationResult {
+  ok: boolean;
+  workspace_path: string;
+  file_count: number;
+  issues: RepoValidationIssue[];
+}
+
+export interface SyncRepoResult {
+  repo_id: number;
+  repo_name: string;
+  local_path: string;
+  workspace_slot: string;
+  indexed_chunks: number;
+  file_count: number;
 }
 
 export interface RepoSlotInput {
@@ -65,4 +92,45 @@ export interface ProjectWithReposInput {
   enabled?: boolean;
   android_repo?: RepoSlotInput;
   cpp_repo?: RepoSlotInput;
+}
+
+export interface ChatSession {
+  id: string;
+  user_id: number;
+  project_id: number;
+  title: string;
+  model_id: number | null;
+  output_mode: string;
+  analysis_scope: string;
+  repo_ids: string;
+  created_at: string;
+  updated_at: string;
+  message_count?: number;
+  last_message_preview?: string;
+}
+
+export interface ChatMessage {
+  id: number;
+  session_id: string;
+  role: string;
+  meta: string;
+  body: string;
+  created_at: string;
+}
+
+export interface AppUser {
+  id: number;
+  account: string;
+  password_hash: string;
+  display_name: string;
+  enabled: boolean | number;
+  created_at: string;
+}
+
+export interface AppUserPublic {
+  id: number;
+  account: string;
+  display_name: string;
+  enabled: boolean;
+  created_at: string;
 }

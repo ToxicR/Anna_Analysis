@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import Database from "better-sqlite3";
-import { DATA_DIR, DB_PATH, REPO_DIR, UPLOAD_DIR } from "./paths.js";
+import { DATA_DIR, DB_PATH, REPO_DIR, UPLOAD_DIR, WORKSPACE_DIR } from "./paths.js";
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(REPO_DIR, { recursive: true });
+fs.mkdirSync(WORKSPACE_DIR, { recursive: true });
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 
 export const db = new Database(DB_PATH);
@@ -105,7 +106,75 @@ export function initDb(): void {
     );
 
     CREATE INDEX IF NOT EXISTS ix_analysis_tasks_project_id ON analysis_tasks(project_id);
+
+    CREATE TABLE IF NOT EXISTS cursor_agent_sessions (
+      session_key TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      updated_at DATETIME NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS chat_sessions (
+      id TEXT PRIMARY KEY,
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      title TEXT DEFAULT '新会话',
+      model_id INTEGER REFERENCES ai_models(id),
+      output_mode VARCHAR(40) DEFAULT 'non_developer',
+      analysis_scope TEXT DEFAULT '',
+      repo_ids TEXT DEFAULT '',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_chat_sessions_project_id ON chat_sessions(project_id);
+    CREATE INDEX IF NOT EXISTS ix_chat_sessions_updated_at ON chat_sessions(updated_at);
+
+    CREATE TABLE IF NOT EXISTS chat_messages (
+      id INTEGER PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES chat_sessions(id) ON DELETE CASCADE,
+      role VARCHAR(20) NOT NULL,
+      meta TEXT DEFAULT '',
+      body TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_chat_messages_session_id ON chat_messages(session_id);
+
+    CREATE TABLE IF NOT EXISTS app_users (
+      id INTEGER PRIMARY KEY,
+      account VARCHAR(80) UNIQUE NOT NULL,
+      password_hash TEXT NOT NULL,
+      display_name VARCHAR(120) DEFAULT '',
+      enabled BOOLEAN DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_app_users_account ON app_users(account);
   `);
+  migrateAnalysisTaskColumns();
+  migrateChatSessionUserColumn();
+}
+
+function migrateChatSessionUserColumn(): void {
+  const columns = db.prepare("PRAGMA table_info(chat_sessions)").all() as Array<{ name: string }>;
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has("user_id")) {
+    db.exec("ALTER TABLE chat_sessions ADD COLUMN user_id INTEGER REFERENCES app_users(id) ON DELETE CASCADE");
+    db.exec("CREATE INDEX IF NOT EXISTS ix_chat_sessions_user_id ON chat_sessions(user_id)");
+    db.exec(`
+      DELETE FROM chat_messages
+      WHERE session_id IN (SELECT id FROM chat_sessions WHERE user_id IS NULL)
+    `);
+    db.exec("DELETE FROM chat_sessions WHERE user_id IS NULL");
+  }
+}
+
+function migrateAnalysisTaskColumns(): void {
+  const columns = db.prepare("PRAGMA table_info(analysis_tasks)").all() as Array<{ name: string }>;
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has("agent_id")) db.exec("ALTER TABLE analysis_tasks ADD COLUMN agent_id TEXT DEFAULT ''");
+  if (!names.has("run_id")) db.exec("ALTER TABLE analysis_tasks ADD COLUMN run_id TEXT DEFAULT ''");
+  if (!names.has("workspace_path")) db.exec("ALTER TABLE analysis_tasks ADD COLUMN workspace_path TEXT DEFAULT ''");
+  if (!names.has("analysis_scope")) db.exec("ALTER TABLE analysis_tasks ADD COLUMN analysis_scope TEXT DEFAULT ''");
 }
 
 export function getSetting(key: string): string {

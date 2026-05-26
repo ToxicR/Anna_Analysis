@@ -15,10 +15,22 @@
 
 ## 启动
 
+开发环境（推荐，始终使用最新功能）：
+
 ```bash
 npm install
 npm run dev
 ```
+
+生产/本地长期运行前请先构建：
+
+```bash
+npm install
+npm run build
+npm start
+```
+
+注意：若直接运行过期的 `node dist/server.js` 而未 `npm run build`，会出现 Agent 分析失败。分析失败时请优先改用 `npm run dev` 并刷新页面。
 
 默认地址：
 
@@ -41,9 +53,27 @@ Cursor API Key 由后端固定配置，不在管理后台录入。可以使用�
 set CURSOR_API_KEY=你的 Cursor API Key
 ```
 
+可选环境变量：
+
+```bash
+# 云端 Agent（服务器本地环境不稳定时使用）
+set CURSOR_AGENT_RUNTIME=cloud
+
+# 关闭两阶段分析（默认开启：先调研再写结论）
+set ANALYSIS_TWO_PHASE=0
+```
+
 管理后台不再手动新增模型；系统会通过 Cursor SDK 自动获取可用模型，并允许选择默认模型。
 
 如果没有可调用模型，系统会返回本地关键词检索摘要，方便先验证项目、仓库、日志和代码索引流程。
+
+## 分析工作区
+
+同一项目的 Android / C++ 仓库会同步到统一目录 `data/workspaces/project_<id>/`（`android/`、`cpp/`、`uploads/`），Agent 只面对一个工作区根目录，行为更接近 Cursor IDE。
+
+分析前会自动校验代码是否已同步、文件数量是否足够，并提示仓库是否缺少 `.cursor/rules`。
+
+同步代码时会为片段建立 **SQLite FTS5 全文索引**，排查类问题预检索时优先使用 FTS（按相关性排序），无结果时回退到关键词匹配。
 
 ## GitLab 仓库
 

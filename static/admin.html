@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>管理后台 · Anna Analysis</title>
+  <link rel="icon" type="image/png" href="/static/assets/anna-logo.png">
+  <link rel="stylesheet" href="/static/styles.css?v=20260520-auth-fix">
+</head>
+<body class="admin-page">
+  <section id="loginScreen" class="admin-login">
+    <form id="loginForm" class="login-card" novalidate>
+      <div class="login-brand">
+        <img class="brand-mark" src="/static/assets/anna-logo.png" alt="Anna logo">
+        <div>
+          <h1>管理后台</h1>
+          <p>Anna Analysis 配置中心</p>
+        </div>
+      </div>
+      <label for="loginAccount">账号</label>
+      <input id="loginAccount" name="account" autocomplete="username" placeholder="请输入管理员账号" required>
+      <label for="loginPassword">密码</label>
+      <input id="loginPassword" name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required>
+      <p id="loginError" class="login-error" hidden></p>
+      <button id="loginSubmit" type="submit" class="primary full">登录</button>
+    </form>
+  </section>
+
+  <div id="adminScreen" class="admin-layout" hidden>
+    <header class="admin-header">
+      <div class="admin-header-brand">
+        <img class="brand-mark" src="/static/assets/anna-logo.png" alt="Anna logo">
+        <div>
+          <strong>管理后台</strong>
+          <span>Anna Analysis</span>
+        </div>
+      </div>
+
+      <nav class="admin-nav" aria-label="管理分类">
+        <button type="button" class="admin-nav-item active" data-admin-page="projects">项目与仓库</button>
+        <button type="button" class="admin-nav-item" data-admin-page="integrations">集成配置</button>
+        <button type="button" class="admin-nav-item" data-admin-page="models">AI 模型</button>
+        <button type="button" class="admin-nav-item" data-admin-page="accounts">账号管理</button>
+        <button type="button" class="admin-nav-item" data-admin-page="history">分析历史</button>
+      </nav>
+
+      <div class="admin-header-actions">
+        <button id="logoutAdmin" type="button">退出登录</button>
+      </div>
+    </header>
+
+    <main class="admin-main">
+      <header class="admin-page-header">
+        <h1 id="adminPageTitle">项目与仓库</h1>
+        <p id="adminPageDesc">创建项目并绑定 Android / C++ 仓库</p>
+      </header>
+
+      <div class="admin-pages">
+        <section id="adminPageProjects" class="admin-page-panel" data-page="projects">
+          <section class="panel admin-panel-form">
+            <div class="panel-heading">
+              <h2>新建项目</h2>
+            </div>
+
+            <div class="admin-form-grid">
+              <div class="admin-form-block">
+                <label>项目名称</label>
+                <input id="projectName" placeholder="例如：音视频分析项目">
+                <label>项目描述</label>
+                <textarea id="projectDesc" rows="3" placeholder="项目说明，可选"></textarea>
+              </div>
+
+              <div class="admin-form-block">
+                <div class="repo-slot">
+                  <h3>Android 仓库</h3>
+                  <label>GitLab 地址</label>
+                  <input id="androidRepoUrl" placeholder="https://gitlab.example.com/group/android.git">
+                  <label>分支</label>
+                  <input id="androidRepoBranch" value="main">
+                </div>
+
+                <div class="repo-slot">
+                  <h3>C++ 仓库</h3>
+                  <label>GitLab 地址</label>
+                  <input id="cppRepoUrl" placeholder="https://gitlab.example.com/group/native.git">
+                  <label>分支</label>
+                  <input id="cppRepoBranch" value="main">
+                </div>
+              </div>
+            </div>
+
+            <button id="saveProject" class="primary">保存项目和仓库</button>
+          </section>
+
+          <section class="panel">
+            <h2>已添加项目</h2>
+            <div id="projectList" class="list admin-list"></div>
+          </section>
+        </section>
+
+        <section id="adminPageIntegrations" class="admin-page-panel" data-page="integrations" hidden>
+          <section class="panel integration-card">
+            <div class="integration-header">
+              <div class="integration-brand">
+                <div class="integration-icon" aria-hidden="true">GL</div>
+                <div>
+                  <h2>GitLab 集成</h2>
+                  <p class="panel-intro">配置全局访问 Token，用于同步私有 GitLab 仓库代码。</p>
+                </div>
+              </div>
+              <span id="gitlabTokenBadge" class="integration-badge">未配置</span>
+            </div>
+
+            <div class="integration-form">
+              <label for="globalGitlabToken">Personal Access Token</label>
+              <div class="integration-input-row">
+                <div class="integration-input-wrap">
+                  <input id="globalGitlabToken" type="password" autocomplete="off" placeholder="glpat-xxxxxxxxxxxxxxxxxxxx">
+                  <button id="toggleGitlabToken" type="button" class="integration-toggle" aria-label="显示或隐藏 Token">显示</button>
+                </div>
+                <button id="saveGitlabToken" type="button" class="primary">保存 Token</button>
+              </div>
+              <p id="gitlabTokenStatus" class="integration-hint">公开仓库可不填；私有仓库需配置 Token。</p>
+            </div>
+
+            <ul class="integration-tips">
+              <li>Token 需具备读取仓库代码权限（read_repository）</li>
+              <li>保存后对所有项目的 GitLab 仓库同步生效</li>
+              <li>留空并保存可清除已配置的 Token</li>
+            </ul>
+          </section>
+        </section>
+
+        <section id="adminPageModels" class="admin-page-panel" data-page="models" hidden>
+          <section class="panel">
+            <div class="panel-heading">
+              <h2>Cursor 模型</h2>
+              <button id="refreshModels" type="button">刷新</button>
+            </div>
+            <p class="panel-intro">模型列表由 Cursor SDK 自动获取，可在此设置默认分析模型。</p>
+            <div id="modelList" class="list admin-list"></div>
+          </section>
+        </section>
+
+        <section id="adminPageAccounts" class="admin-page-panel" data-page="accounts" hidden>
+          <section class="panel admin-panel-form">
+            <div class="panel-heading">
+              <h2>新建前端登录账号</h2>
+            </div>
+            <p class="panel-intro">在此创建的账号用于前端分析页登录，与管理后台管理员账号相互独立。</p>
+            <div class="admin-form-grid admin-form-grid-compact">
+              <div class="admin-form-block">
+                <label for="newUserAccount">登录账号</label>
+                <input id="newUserAccount" placeholder="例如：13800138000" autocomplete="off">
+                <label for="newUserPassword">登录密码</label>
+                <input id="newUserPassword" type="password" placeholder="设置初始密码" autocomplete="new-password">
+              </div>
+              <div class="admin-form-block">
+                <label for="newUserDisplayName">显示名称（可选）</label>
+                <input id="newUserDisplayName" placeholder="例如：张三">
+                <label class="checkbox-row">
+                  <input id="newUserEnabled" type="checkbox" checked>
+                  启用账号
+                </label>
+              </div>
+            </div>
+            <button id="saveUser" type="button" class="primary">创建账号</button>
+          </section>
+
+          <section class="panel">
+            <h2>已创建账号</h2>
+            <div id="userList" class="list admin-list"></div>
+          </section>
+        </section>
+
+        <section id="adminPageHistory" class="admin-page-panel" data-page="history" hidden>
+          <section class="panel">
+            <div class="panel-heading">
+              <h2>分析历史</h2>
+              <button id="clearTasks" type="button" class="danger">清空</button>
+            </div>
+            <p class="panel-intro">查看和管理已执行的分析任务记录。</p>
+            <div id="taskList" class="list history admin-list"></div>
+          </section>
+        </section>
+      </div>
+    </main>
+  </div>
+
+  <div id="editUserBackdrop" class="session-backdrop" hidden>
+    <div class="session-modal analysis-settings-modal" role="dialog" aria-labelledby="editUserTitle">
+      <div class="session-modal-header">
+        <div>
+          <h3 id="editUserTitle">编辑账号</h3>
+          <p id="editUserSubtitle">修改显示名称、状态或重置密码</p>
+        </div>
+        <button id="closeEditUser" type="button">关闭</button>
+      </div>
+      <div class="analysis-settings-body admin-modal-body">
+        <label>登录账号</label>
+        <input id="editUserAccount" readonly>
+
+        <label>显示名称</label>
+        <input id="editUserDisplayName" placeholder="显示在前端页右上角">
+
+        <label class="checkbox-row">
+          <input id="editUserEnabled" type="checkbox">
+          启用账号
+        </label>
+
+        <label>新密码（留空则不修改）</label>
+        <input id="editUserPassword" type="password" placeholder="如需重置密码请填写" autocomplete="new-password">
+
+        <button id="saveEditUser" type="button" class="primary full">保存修改</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="editProjectBackdrop" class="session-backdrop" hidden>
+    <div class="session-modal analysis-settings-modal" role="dialog" aria-labelledby="editProjectTitle">
+      <div class="session-modal-header">
+        <div>
+          <h3 id="editProjectTitle">编辑项目</h3>
+          <p id="editProjectSubtitle">修改项目信息与仓库配置</p>
+        </div>
+        <button id="closeEditProject" type="button">关闭</button>
+      </div>
+      <div class="analysis-settings-body admin-modal-body">
+        <label>项目名称</label>
+        <input id="editProjectName" placeholder="例如：音视频分析项目">
+
+        <label>项目描述</label>
+        <textarea id="editProjectDesc" rows="3" placeholder="项目说明，可选"></textarea>
+
+        <div class="repo-slot">
+          <h3>Android 仓库</h3>
+          <label>GitLab 地址</label>
+          <input id="editAndroidRepoUrl" placeholder="https://gitlab.example.com/group/android.git">
+          <label>分支</label>
+          <input id="editAndroidRepoBranch" value="main">
+        </div>
+
+        <div class="repo-slot">
+          <h3>C++ 仓库</h3>
+          <label>GitLab 地址</label>
+          <input id="editCppRepoUrl" placeholder="https://gitlab.example.com/group/native.git">
+          <label>分支</label>
+          <input id="editCppRepoBranch" value="main">
+        </div>
+
+        <button id="saveEditProject" type="button" class="primary full">保存修改</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="confirmBackdrop" class="session-backdrop" hidden>
+    <div class="session-modal admin-confirm-modal" role="dialog" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
+      <button id="closeConfirm" type="button" class="modal-close-btn" aria-label="关闭">×</button>
+      <div class="admin-confirm-body">
+        <div id="confirmIcon" class="admin-confirm-icon" aria-hidden="true">!</div>
+        <div class="admin-confirm-copy">
+          <h3 id="confirmTitle">确认操作</h3>
+          <p id="confirmMessage"></p>
+        </div>
+      </div>
+      <div class="admin-confirm-actions">
+        <button id="cancelConfirm" type="button">取消</button>
+        <button id="confirmAction" type="button" class="primary danger">确认</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/admin.js?v=20260520-auth-fix"></script>
+</body>
+</html>

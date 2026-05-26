@@ -5,10 +5,41 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Anna Analysis</title>
   <link rel="icon" type="image/png" href="/static/assets/anna-logo.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260520-sdk-auto">
+  <link rel="stylesheet" href="/static/styles.css?v=20260520-no-flash">
+  <style>
+    #appScreen:not([hidden]) .app-shell {
+      display: grid;
+      grid-template-columns: 280px minmax(420px, 1fr);
+      height: 100dvh;
+      overflow: hidden;
+    }
+    #chatPanel[hidden],
+    #newChatPanel[hidden] {
+      display: none !important;
+    }
+  </style>
 </head>
 <body>
-  <div class="app-shell">
+  <section id="loginScreen" class="admin-login">
+    <form id="loginForm" class="login-card" novalidate>
+      <div class="login-brand">
+        <img class="brand-mark" src="/static/assets/anna-logo.png" alt="Anna logo">
+        <div>
+          <h1>Anna Analysis</h1>
+          <p>请使用管理员分配的账号登录</p>
+        </div>
+      </div>
+      <label for="loginAccount">账号</label>
+      <input id="loginAccount" name="account" autocomplete="username" placeholder="请输入账号" required>
+      <label for="loginPassword">密码</label>
+      <input id="loginPassword" name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required>
+      <p id="loginError" class="login-error" hidden></p>
+      <button id="loginSubmit" type="submit" class="primary full">登录</button>
+    </form>
+  </section>
+
+  <div id="appScreen" hidden>
+  <div id="appShell" class="app-shell has-main-panel">
     <aside class="sidebar">
       <div class="brand">
         <img class="brand-mark" src="/static/assets/anna-logo.png" alt="Anna logo">
@@ -19,35 +50,88 @@
       </div>
 
       <section class="side-section">
-        <div class="section-title">当前上下文</div>
-        <label>项目</label>
-        <select id="analysisProject"></select>
+        <div class="section-title">会话</div>
+        <div id="sessionSummary" class="session-summary">请选择或新建会话</div>
+        <div class="session-actions">
+          <button id="newChatSession" type="button" class="full primary">新建会话</button>
+        </div>
+        <div id="sidebarSessionList" class="sidebar-session-list"></div>
+      </section>
 
-        <label>参与分析的仓库</label>
-        <div id="analysisRepos" class="repo-checks"></div>
-
-        <label>AI 模型</label>
-        <select id="analysisModel"></select>
-
-        <label>输出模式</label>
-        <select id="outputMode">
-          <option value="non_developer" selected>非研发模式</option>
-          <option value="developer">研发模式</option>
-        </select>
-
+      <section class="side-section side-user-bar">
+        <span id="userAccountLabel" class="user-account-label"></span>
+        <button id="logoutUser" type="button" class="full">退出登录</button>
       </section>
 
     </aside>
 
-    <main class="chat">
+    <main id="newChatPanel" class="new-chat-landing">
+      <div class="new-chat-center">
+        <h2 id="newChatHeadline" class="new-chat-headline">想让我帮你分析些什么？</h2>
+
+        <div id="newChatComposer" class="new-chat-composer">
+          <div id="newAttachmentBar" class="attachment-bar new-chat-attachment-bar" hidden>
+            <span data-attachment-name></span>
+            <button id="newRemoveAttachment" type="button">移除</button>
+          </div>
+
+          <div class="new-chat-input-area">
+            <textarea id="newQuestion" rows="3" placeholder="尽管问，可描述功能、问题现象，或粘贴日志片段"></textarea>
+          </div>
+
+          <div class="new-chat-toolbar">
+            <div class="new-chat-toolbar-left">
+              <button id="newAddAttachment" type="button" class="new-chat-icon-btn" title="添加附件" aria-label="添加附件">
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M12 5v14M5 12h14"/></svg>
+              </button>
+              <label class="new-chat-project-pill">
+                <svg class="new-chat-project-icon" viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M10 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-8l-2-2z"/></svg>
+                <select id="analysisProject" class="new-chat-select"></select>
+              </label>
+            </div>
+            <div class="new-chat-toolbar-right">
+              <label class="new-chat-select-pill new-chat-model-pill">
+                <span class="new-chat-select-label">模型</span>
+                <select id="analysisModel" class="new-chat-select new-chat-model-select"></select>
+              </label>
+              <button id="newRunAnalysis" type="button" class="new-chat-send" title="发送分析" aria-label="发送分析">
+                <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M12 19V5m0 0l-6 6m6-6l6 6"/></svg>
+              </button>
+            </div>
+          </div>
+
+          <div class="new-chat-config-bar">
+            <label class="new-chat-select-pill">
+              <span class="new-chat-select-label">模式</span>
+              <select id="outputMode" class="new-chat-select">
+                <option value="non_developer" selected>非研发模式</option>
+                <option value="developer">研发模式</option>
+              </select>
+            </label>
+            <label class="new-chat-select-pill new-chat-scope-pill">
+              <span class="new-chat-select-label">范围</span>
+              <input id="analysisScope" type="text" placeholder="可选，如 android/ 支付模块">
+            </label>
+          </div>
+
+          <div id="analysisRepos" class="new-chat-repos-hidden" hidden></div>
+        </div>
+
+        <section class="new-chat-suggestions">
+          <div id="newQuestionTemplates" class="question-templates new-chat-templates" aria-label="快速提问模板"></div>
+        </section>
+        <div id="newAnalysisResult" class="new-chat-status">准备就绪</div>
+      </div>
+    </main>
+
+    <main id="chatPanel" class="chat" hidden>
       <header class="chat-header">
-        <div>
+        <div class="chat-header-main">
           <h2>分析对话</h2>
-          <p id="chatContext">选择项目和仓库后，直接像和 Agent 对话一样提问。</p>
+          <p id="chatProjectContext" class="chat-project-context">尚未创建会话</p>
         </div>
         <div class="chat-actions">
           <button id="clearChat" type="button">清空对话</button>
-          <button id="openAdmin" type="button" class="primary">管理后台</button>
         </div>
       </header>
 
@@ -56,18 +140,19 @@
           <img class="avatar ai-avatar" src="/static/assets/anna-logo.png" alt="Anna AI">
           <div class="bubble">
             <div class="message-meta">Anna Analysis</div>
-            <div class="message-body">选择项目、仓库和模型后，输入你要分析的问题。例如：Android 调用 C++ 的链路是怎么实现的？或者上传日志后让我分析崩溃原因。</div>
+            <div class="message-body">选择项目和仓库后，点击下方<strong>快速提问</strong>模板，把【括号内容】改成你的实际情况即可发送。也可直接输入问题，或上传日志/截图排查问题。</div>
           </div>
         </article>
       </section>
 
       <footer id="composer" class="composer">
         <div id="attachmentBar" class="attachment-bar" hidden>
-          <span id="attachmentName"></span>
+          <span data-attachment-name></span>
           <button id="removeAttachment" type="button">移除</button>
         </div>
         <input id="logFile" type="file" multiple hidden>
-        <textarea id="question" rows="3" placeholder="输入问题，例如：这个功能是怎么实现的？根据日志定位问题原因。"></textarea>
+        <div id="questionTemplates" class="question-templates" aria-label="快速提问模板"></div>
+        <textarea id="question" rows="3" placeholder="输入问题，或点击上方模板快速开始。把【括号内容】改成你的实际情况。"></textarea>
         <div class="composer-actions">
           <div class="composer-left">
             <button id="addAttachment" type="button" class="icon-button" title="添加附件">+</button>
@@ -79,84 +164,8 @@
     </main>
 
   </div>
-
-  <div id="adminBackdrop" class="admin-backdrop" hidden>
-    <aside class="inspector admin-panel">
-      <div class="admin-panel-header">
-        <div>
-          <h2>管理后台</h2>
-          <p>维护项目、仓库、模型和 GitLab Token</p>
-        </div>
-        <button id="closeAdmin" type="button">关闭</button>
-      </div>
-
-      <section class="panel">
-        <div class="panel-heading">
-          <h2 id="projectFormTitle">项目与仓库</h2>
-          <button id="cancelEditProject" type="button">取消编辑</button>
-        </div>
-
-        <label>项目名称</label>
-        <input id="projectName" placeholder="例如：音视频分析项目">
-        <label>项目描述</label>
-        <textarea id="projectDesc" rows="3" placeholder="项目说明，可选"></textarea>
-
-        <div class="repo-slot">
-          <h3>Android 仓库</h3>
-          <label>GitLab 地址</label>
-          <input id="androidRepoUrl" placeholder="https://gitlab.example.com/group/android.git">
-          <label>分支</label>
-          <input id="androidRepoBranch" value="main">
-        </div>
-
-        <div class="repo-slot">
-          <h3>C++ 仓库</h3>
-          <label>GitLab 地址</label>
-          <input id="cppRepoUrl" placeholder="https://gitlab.example.com/group/native.git">
-          <label>分支</label>
-          <input id="cppRepoBranch" value="main">
-        </div>
-
-        <button id="saveProject" class="primary full">保存项目和仓库</button>
-      </section>
-
-      <section class="panel">
-        <h2>已添加项目</h2>
-        <div id="projectList" class="list"></div>
-      </section>
-
-      <section class="panel">
-        <h2>项目仓库</h2>
-        <div id="repoList" class="list"></div>
-      </section>
-
-      <section class="panel">
-        <h2>全局 GitLab Token</h2>
-        <label>访问 Token</label>
-        <input id="globalGitlabToken" type="password" placeholder="所有 GitLab 仓库同步共用">
-        <button id="saveGitlabToken" class="full">保存 Token</button>
-        <div id="gitlabTokenStatus" class="status-text">未配置</div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-heading">
-          <h2>Cursor 模型</h2>
-          <button id="refreshModels" type="button">刷新</button>
-        </div>
-        <div class="status-text">模型列表由 Cursor SDK 自动获取</div>
-        <div id="modelList" class="list"></div>
-      </section>
-
-      <section class="panel">
-        <div class="panel-heading">
-          <h2>分析历史</h2>
-          <button id="clearTasks" type="button" class="danger">清空</button>
-        </div>
-        <div id="taskList" class="list history"></div>
-      </section>
-    </aside>
   </div>
 
-  <script src="/static/app.js?v=20260520-sdk-auto"></script>
+  <script src="/static/app.js?v=20260520-session-switch"></script>
 </body>
 </html>

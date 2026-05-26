@@ -5,26 +5,81 @@ import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import staticPlugin from "@fastify/static";
 import dotenv from "dotenv";
-import Fastify, { type FastifyReply } from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
+import {
+  clearAdminSessionCookie,
+  createAdminSession,
+  destroyAdminSession,
+  getAdminSession,
+  getAdminSessionToken,
+  isAdminAuthenticated,
+  requireAdmin,
+  setAdminSessionCookie,
+  verifyAdminCredentials,
+} from "./auth.js";
 import { db, boolToInt, getSetting, initDb, normalizeRow, normalizeRows, nowIso, setSetting } from "./db.js";
 import { STATIC_DIR, UPLOAD_DIR } from "./paths.js";
-import { inferAnalysisType, analyzeWithModel, type OutputMode } from "./services/ai.js";
-import { searchCode, syncRepo } from "./services/code.js";
+import { inferAnalysisType, analyzeWithModel, startCursorSessionMaintenance, type AnalysisResult, type OutputMode } from "./services/ai.js";
+import { initCodeFts } from "./services/code-fts.js";
+import { searchCodeForAnalysis, syncRepo, syncReposToWorkspace, validateReposForAnalysis, copyAttachmentsToWorkspace } from "./services/code.js";
+import { deleteProjectCascade, deleteRepoCascade } from "./services/project-delete.js";
 import { syncCursorModels } from "./services/cursor-models.js";
-import type { AIModel, AnalysisTask, GitRepo, Project, ProjectWithReposInput, RepoSlotInput } from "./types.js";
+import {
+  createAppUser,
+  deleteAppUser,
+  getAppUserById,
+  listAppUsers,
+  updateAppUser,
+  verifyAppUserCredentials,
+} from "./services/app-users.js";
+import {
+  clearUserSessionCookie,
+  createUserSession,
+  destroyUserSession,
+  getUserSession,
+  getUserIdFromRequest,
+  getUserSessionToken,
+  isUserAuthenticated,
+  requireUser,
+  setUserSessionCookie,
+} from "./user-auth.js";
+import type { AIModel, AnalysisTask, ChatMessage, ChatSession, GitRepo, Project, ProjectWithReposInput, RepoSlotInput } from "./types.js";
 
 dotenv.config();
 initDb();
+initCodeFts();
+startCursorSessionMaintenance();
 
 interface UploadedAttachment {
   file_name: string;
   stored_name: string;
   mime_type: string;
   path: string;
+  workspace_path?: string;
+  relative_path?: string;
   size: number;
   text: string;
   image_url?: string;
 }
+
+interface AnalyzePayload {
+  project_id: number;
+  repo_ids: number[];
+  model_id?: number | null;
+  analysis_type?: string;
+  analysis_scope?: string;
+  question?: string;
+  log_text?: string;
+  attachment_images?: { url: string }[];
+  conversation_context?: string;
+  chat_session_id?: string;
+  output_mode?: OutputMode;
+  skip_sync?: boolean;
+  force_sync?: boolean;
+}
+
+const workspaceSyncCache = new Map<string, number>();
+const WORKSPACE_SYNC_TTL_MS = 1000 * 60 * 60 * 3;
 
 const app = Fastify({ logger: true, bodyLimit: 5 * 1024 * 1024 });
 
@@ -37,8 +92,113 @@ app.setErrorHandler((error: Error & { statusCode?: number }, _request, reply) =>
   reply.status(statusCode).send({ detail: error.message || "Internal Server Error" });
 });
 
+function getApiPath(url: string): string {
+  return url.split("?")[0] ?? url;
+}
+
+app.addHook("onRequest", async (request, reply) => {
+  const path = getApiPath(request.url);
+  if (!path.startsWith("/api/")) return;
+  if (path.startsWith("/api/admin")) return;
+  if (path === "/api/auth/login" || path === "/api/auth/logout" || path === "/api/auth/me") return;
+
+  if (!isUserAuthenticated(request) && !isAdminAuthenticated(request)) {
+    return reply.status(401).send({ detail: "请先登录" });
+  }
+});
+
 app.get("/", async (_request, reply) => {
   return reply.type("text/html").send(fs.createReadStream(path.join(STATIC_DIR, "index.html")));
+});
+
+app.get("/admin", async (_request, reply) => {
+  return reply.type("text/html").send(fs.createReadStream(path.join(STATIC_DIR, "admin.html")));
+});
+
+app.get("/api/admin/me", async (request, reply) => {
+  const session = getAdminSession(request);
+  if (!session) return reply.status(401).send({ detail: "未登录或会话已过期" });
+  return { account: session.account };
+});
+
+app.post("/api/admin/login", async (request, reply) => {
+  const payload = request.body as { account?: string; password?: string };
+  const account = payload.account?.trim() ?? "";
+  const password = payload.password ?? "";
+  if (!verifyAdminCredentials(account, password)) {
+    return reply.status(401).send({ detail: "账号或密码错误" });
+  }
+  const token = createAdminSession(account);
+  setAdminSessionCookie(reply, token);
+  return { account };
+});
+
+app.post("/api/admin/logout", async (request, reply) => {
+  destroyAdminSession(getAdminSessionToken(request));
+  clearAdminSessionCookie(reply);
+  return { ok: true };
+});
+
+app.get("/api/auth/me", async (request, reply) => {
+  const session = getUserSession(request);
+  if (!session) return reply.status(401).send({ detail: "未登录或会话已过期" });
+  const user = getAppUserById(session.userId);
+  if (!user || !user.enabled) return reply.status(401).send({ detail: "账号不存在或已禁用" });
+  return { id: user.id, account: user.account, display_name: user.display_name || user.account };
+});
+
+app.post("/api/auth/login", async (request, reply) => {
+  const payload = request.body as { account?: string; password?: string };
+  const account = payload.account?.trim() ?? "";
+  const password = payload.password ?? "";
+  const user = verifyAppUserCredentials(account, password);
+  if (!user) return reply.status(401).send({ detail: "账号或密码错误，或账号已禁用" });
+  const token = createUserSession(user.id, user.account);
+  setUserSessionCookie(reply, token);
+  return { id: user.id, account: user.account, display_name: user.display_name };
+});
+
+app.post("/api/auth/logout", async (request, reply) => {
+  destroyUserSession(getUserSessionToken(request));
+  clearUserSessionCookie(reply);
+  return { ok: true };
+});
+
+app.get("/api/admin/users", { preHandler: requireAdmin }, async () => {
+  return listAppUsers();
+});
+
+app.post("/api/admin/users", { preHandler: requireAdmin }, async (request, reply) => {
+  const payload = request.body as { account?: string; password?: string; display_name?: string; enabled?: boolean };
+  try {
+    return createAppUser({
+      account: payload.account ?? "",
+      password: payload.password ?? "",
+      display_name: payload.display_name,
+      enabled: payload.enabled,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("UNIQUE constraint failed: app_users.account")) {
+      return badRequest(reply, "账号已存在，请换一个账号");
+    }
+    return badRequest(reply, message);
+  }
+});
+
+app.put("/api/admin/users/:userId", { preHandler: requireAdmin }, async (request, reply) => {
+  const userId = Number((request.params as { userId: string }).userId);
+  const payload = request.body as { display_name?: string; enabled?: boolean; password?: string };
+  const user = updateAppUser(userId, payload);
+  if (!user) return notFound(reply, "账号不存在");
+  return user;
+});
+
+app.delete("/api/admin/users/:userId", { preHandler: requireAdmin }, async (request, reply) => {
+  const userId = Number((request.params as { userId: string }).userId);
+  if (!getAppUserById(userId)) return notFound(reply, "账号不存在");
+  deleteAppUser(userId);
+  return { ok: true };
 });
 
 app.get("/api/projects", async () => {
@@ -46,7 +206,7 @@ app.get("/api/projects", async () => {
   return normalizeRows(rows);
 });
 
-app.post("/api/projects", async (request, reply) => {
+app.post("/api/projects", { preHandler: requireAdmin }, async (request, reply) => {
   const payload = request.body as { name?: string; description?: string; enabled?: boolean };
   try {
     const result = db.prepare(`
@@ -65,7 +225,7 @@ app.post("/api/projects", async (request, reply) => {
   }
 });
 
-app.put("/api/projects/:projectId", async (request, reply) => {
+app.put("/api/projects/:projectId", { preHandler: requireAdmin }, async (request, reply) => {
   const projectId = Number((request.params as { projectId: string }).projectId);
   if (!getProject(projectId)) return notFound(reply, "项目不存在");
   const payload = request.body as { name?: string; description?: string; enabled?: boolean };
@@ -78,7 +238,7 @@ app.put("/api/projects/:projectId", async (request, reply) => {
   }
 });
 
-app.post("/api/projects/with-repos", async (request, reply) => {
+app.post("/api/projects/with-repos", { preHandler: requireAdmin }, async (request, reply) => {
   const payload = request.body as ProjectWithReposInput;
   const slots = [
     ["Android", payload.android_repo ?? {}],
@@ -114,7 +274,7 @@ app.post("/api/projects/with-repos", async (request, reply) => {
   }
 });
 
-app.put("/api/projects/:projectId/with-repos", async (request, reply) => {
+app.put("/api/projects/:projectId/with-repos", { preHandler: requireAdmin }, async (request, reply) => {
   const projectId = Number((request.params as { projectId: string }).projectId);
   const payload = request.body as ProjectWithReposInput;
   const project = getProject(projectId);
@@ -145,11 +305,15 @@ app.put("/api/projects/:projectId/with-repos", async (request, reply) => {
   }
 });
 
-app.delete("/api/projects/:projectId", async (request, reply) => {
+app.delete("/api/projects/:projectId", { preHandler: requireAdmin }, async (request, reply) => {
   const projectId = Number((request.params as { projectId: string }).projectId);
   if (!getProject(projectId)) return notFound(reply, "项目不存在");
-  db.prepare("DELETE FROM projects WHERE id = ?").run(projectId);
-  return { ok: true };
+  try {
+    deleteProjectCascade(projectId);
+    return { ok: true };
+  } catch (error) {
+    throw new Error(`删除项目失败：${error instanceof Error ? error.message : String(error)}`);
+  }
 });
 
 app.get("/api/repos", async (request) => {
@@ -160,7 +324,7 @@ app.get("/api/repos", async (request) => {
   return normalizeRows(rows as GitRepo[]);
 });
 
-app.post("/api/repos", async (request, reply) => {
+app.post("/api/repos", { preHandler: requireAdmin }, async (request, reply) => {
   const payload = request.body as {
     project_id?: number;
     name?: string;
@@ -185,7 +349,7 @@ app.post("/api/repos", async (request, reply) => {
   return getRepo(Number(result.lastInsertRowid));
 });
 
-app.put("/api/repos/:repoId", async (request, reply) => {
+app.put("/api/repos/:repoId", { preHandler: requireAdmin }, async (request, reply) => {
   const repoId = Number((request.params as { repoId: string }).repoId);
   if (!getRepo(repoId)) return notFound(reply, "仓库不存在");
   const payload = request.body as {
@@ -214,46 +378,53 @@ app.put("/api/repos/:repoId", async (request, reply) => {
   return getRepo(repoId);
 });
 
-app.delete("/api/repos/:repoId", async (request, reply) => {
+app.delete("/api/repos/:repoId", { preHandler: requireAdmin }, async (request, reply) => {
   const repoId = Number((request.params as { repoId: string }).repoId);
   if (!getRepo(repoId)) return notFound(reply, "仓库不存在");
-  db.prepare("DELETE FROM git_repos WHERE id = ?").run(repoId);
-  return { ok: true };
+  try {
+    deleteRepoCascade(repoId);
+    return { ok: true };
+  } catch (error) {
+    throw new Error(`删除仓库失败：${error instanceof Error ? error.message : String(error)}`);
+  }
 });
 
-app.post("/api/repos/sync", async (request, reply) => {
+app.post("/api/repos/sync", { preHandler: requireAdmin }, async (request, reply) => {
   const payload = request.body as { repo_ids?: number[] };
   const repoIds = payload.repo_ids ?? [];
   if (!repoIds.length) return badRequest(reply, "请至少选择一个仓库");
   const repos = getReposByIds(repoIds);
   if (repos.length !== repoIds.length) return notFound(reply, "仓库不存在");
 
-  const token = getSetting("gitlab_access_token");
-  const results = [];
-  for (const repo of repos) {
-    try {
-      const result = await syncRepo(repo, token);
-      results.push({ repo_id: repo.id, repo_name: repo.name, ...result });
-    } catch (error) {
-      throw new Error(`${repo.name} 刷新代码索引失败：${error instanceof Error ? error.message : String(error)}`);
-    }
+  const projectId = repos[0]!.project_id;
+  if (!repos.every((repo) => repo.project_id === projectId)) {
+    return badRequest(reply, "一次只能同步同一项目下的仓库");
   }
-  return { synced: results };
+
+  try {
+    const token = getSetting("gitlab_access_token");
+    const synced = await syncReposToWorkspace(projectId, repos, token);
+    const refreshed = getReposByIds(repoIds);
+    const validation = validateReposForAnalysis(projectId, refreshed);
+    return { synced, validation };
+  } catch (error) {
+    throw new Error(`刷新代码失败：${error instanceof Error ? error.message : String(error)}`);
+  }
 });
 
-app.post("/api/repos/:repoId/sync", async (request, reply) => {
+app.post("/api/repos/:repoId/sync", { preHandler: requireAdmin }, async (request, reply) => {
   const repoId = Number((request.params as { repoId: string }).repoId);
   const repo = getRepo(repoId);
   if (!repo) return notFound(reply, "仓库不存在");
   return syncRepo(repo, getSetting("gitlab_access_token"));
 });
 
-app.get("/api/settings/gitlab-token", async () => {
+app.get("/api/settings/gitlab-token", { preHandler: requireAdmin }, async () => {
   const token = getSetting("gitlab_access_token");
   return { configured: Boolean(token), access_token: token };
 });
 
-app.put("/api/settings/gitlab-token", async (request) => {
+app.put("/api/settings/gitlab-token", { preHandler: requireAdmin }, async (request) => {
   const payload = request.body as { access_token?: string };
   const token = payload.access_token?.trim() ?? "";
   setSetting("gitlab_access_token", token);
@@ -269,7 +440,7 @@ app.post("/api/models", async (request, reply) => {
   return badRequest(reply, "Cursor 模型列表由 Cursor SDK 自动获取，不支持手动新增");
 });
 
-app.put("/api/models/:modelId", async (request, reply) => {
+app.put("/api/models/:modelId", { preHandler: requireAdmin }, async (request, reply) => {
   const modelId = Number((request.params as { modelId: string }).modelId);
   const model = getModel(modelId);
   if (!model) return notFound(reply, "模型不存在");
@@ -282,58 +453,19 @@ app.delete("/api/models/:modelId", async (request, reply) => {
   return badRequest(reply, "Cursor 模型列表由 Cursor SDK 自动获取，不支持手动删除");
 });
 
-app.post("/api/analyze", async (request, reply) => {
-  const payload = request.body as {
-    project_id: number;
-    repo_ids: number[];
-    model_id?: number | null;
-    analysis_type?: string;
-    question?: string;
-    log_text?: string;
-    attachment_images?: { url: string }[];
-    conversation_context?: string;
-    chat_session_id?: string;
-    output_mode?: OutputMode;
-  };
+app.post("/api/analyze", { preHandler: requireUser }, async (request, reply) => {
+  const payload = request.body as AnalyzePayload;
   if (!payload.repo_ids?.length) return badRequest(reply, "请至少选择一个仓库");
-  const project = getProject(payload.project_id);
-  if (!project) return notFound(reply, "项目不存在");
-
-  const repos = getReposByIds(payload.repo_ids).filter((repo) => repo.project_id === payload.project_id);
-  if (!repos.length) return badRequest(reply, "仓库与项目不匹配");
-
-  const model = payload.model_id ? getModel(payload.model_id) : getDefaultModel();
-  const question = payload.question ?? "";
-  const logText = payload.log_text ?? "";
-  const attachmentImages = normalizeAttachmentImages(payload.attachment_images);
-  const conversationContext = payload.conversation_context ?? "";
-  const chatSessionId = payload.chat_session_id ?? "";
-  const outputMode = normalizeOutputMode(payload.output_mode);
-  const chunks = searchCode(repos.map((repo) => repo.id), `${question}\n${conversationContext}\n${logText}`);
-  const analysisType = payload.analysis_type || inferAnalysisType(question, logText);
-  const result = await analyzeWithModel(model, question, analysisType, chunks, logText, repos, conversationContext, chatSessionId, outputMode, attachmentImages);
-
-  const insertResult = db.prepare(`
-    INSERT INTO analysis_tasks(project_id, model_id, analysis_type, question, log_text, selected_repo_ids, status, result, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?)
-  `).run(payload.project_id, model?.id ?? null, analysisType, question, logText, payload.repo_ids.join(","), result, nowIso());
-
-  return getTask(Number(insertResult.lastInsertRowid));
+  const userId = getUserIdFromRequest(request)!;
+  if (!assertChatSessionOwned(payload.chat_session_id, userId, reply)) return;
+  const { taskId } = await executeAnalysis(payload);
+  return getTask(taskId);
 });
 
-app.post("/api/analyze/stream", async (request, reply) => {
-  const payload = request.body as {
-    project_id: number;
-    repo_ids: number[];
-    model_id?: number | null;
-    analysis_type?: string;
-    question?: string;
-    log_text?: string;
-    attachment_images?: { url: string }[];
-    conversation_context?: string;
-    chat_session_id?: string;
-    output_mode?: OutputMode;
-  };
+app.post("/api/analyze/stream", { preHandler: requireUser }, async (request, reply) => {
+  const payload = request.body as AnalyzePayload;
+  const userId = getUserIdFromRequest(request)!;
+  if (!assertChatSessionOwned(payload.chat_session_id, userId, reply)) return;
 
   reply.raw.writeHead(200, {
     "Content-Type": "text/event-stream; charset=utf-8",
@@ -348,34 +480,12 @@ app.post("/api/analyze/stream", async (request, reply) => {
 
   try {
     send("status", { message: "准备分析上下文" });
-    if (!payload.repo_ids?.length) throw new Error("请至少选择一个仓库");
-    const project = getProject(payload.project_id);
-    if (!project) throw new Error("项目不存在");
-
-    const repos = getReposByIds(payload.repo_ids).filter((repo) => repo.project_id === payload.project_id);
-    if (!repos.length) throw new Error("仓库与项目不匹配");
-
-    const model = payload.model_id ? getModel(payload.model_id) : getDefaultModel();
-    const question = payload.question ?? "";
-    const logText = payload.log_text ?? "";
-    const attachmentImages = normalizeAttachmentImages(payload.attachment_images);
-    const conversationContext = payload.conversation_context ?? "";
-    const chatSessionId = payload.chat_session_id ?? "";
-    const outputMode = normalizeOutputMode(payload.output_mode);
-    const chunks = searchCode(repos.map((repo) => repo.id), `${question}\n${conversationContext}\n${logText}`);
-    const analysisType = payload.analysis_type || inferAnalysisType(question, logText);
-
-    send("status", { message: "Agent 正在分析代码" });
-    const result = await analyzeWithModel(model, question, analysisType, chunks, logText, repos, conversationContext, chatSessionId, outputMode, attachmentImages, {
+    const { taskId } = await executeAnalysis(payload, {
       onStatus: (message) => send("status", { message }),
       onDelta: (text) => send("delta", { text }),
+      onActivity: (activity) => send("activity", activity),
     });
-    const insertResult = db.prepare(`
-      INSERT INTO analysis_tasks(project_id, model_id, analysis_type, question, log_text, selected_repo_ids, status, result, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?)
-    `).run(payload.project_id, model?.id ?? null, analysisType, question, logText, payload.repo_ids.join(","), result, nowIso());
-
-    send("result", getTask(Number(insertResult.lastInsertRowid)));
+    send("result", getTask(taskId));
     send("done", { ok: true });
   } catch (error) {
     send("error", { detail: error instanceof Error ? error.message : String(error) });
@@ -384,7 +494,13 @@ app.post("/api/analyze/stream", async (request, reply) => {
   }
 });
 
-app.post("/api/analyze/upload-log", async (request, reply) => {
+app.post("/api/analyze/upload-log", { preHandler: requireUser }, async (request, reply) => {
+  const query = request.query as { project_id?: string; chat_session_id?: string };
+  const projectId = Number(query.project_id);
+  const chatSessionId = String(query.chat_session_id || "");
+  const userId = getUserIdFromRequest(request)!;
+  if (!assertChatSessionOwned(chatSessionId || undefined, userId, reply)) return;
+
   const uploaded: UploadedAttachment[] = [];
   for await (const file of request.files()) {
     const safeName = path.basename(file.filename);
@@ -393,12 +509,25 @@ app.post("/api/analyze/upload-log", async (request, reply) => {
     const buffer = await file.toBuffer();
     fs.writeFileSync(filePath, buffer);
     const text = isTextAttachment(safeName, file.mimetype) ? buffer.toString("utf8").slice(0, 100_000) : "";
-    const imageUrl = file.mimetype.startsWith("image/") ? pathToFileURL(filePath).href : undefined;
+
+    let workspacePath = filePath;
+    let relativePath = storedName;
+    if (projectId) {
+      const copied = copyAttachmentsToWorkspace(projectId, chatSessionId || "default", [{ stored_name: storedName, source_path: filePath }]);
+      if (copied[0]) {
+        workspacePath = copied[0].workspace_path;
+        relativePath = copied[0].relative_path;
+      }
+    }
+
+    const imageUrl = file.mimetype.startsWith("image/") ? pathToFileURL(workspacePath).href : undefined;
     uploaded.push({
       file_name: safeName,
       stored_name: storedName,
       mime_type: file.mimetype,
       path: filePath,
+      workspace_path: workspacePath,
+      relative_path: relativePath,
       size: buffer.length,
       text,
       image_url: imageUrl,
@@ -411,7 +540,97 @@ app.post("/api/analyze/upload-log", async (request, reply) => {
   return { files: uploaded, text, file_name: uploaded.map((file) => file.file_name).join(", ") };
 });
 
-app.get("/api/tasks", async (request) => {
+app.get("/api/chat/sessions", { preHandler: requireUser }, async (request, reply) => {
+  const userId = getUserIdFromRequest(request)!;
+  const projectId = Number((request.query as { project_id?: string }).project_id);
+  if (projectId) {
+    if (!getProject(projectId)) return notFound(reply, "项目不存在");
+    return listChatSessions(userId, projectId);
+  }
+  return listChatSessions(userId);
+});
+
+app.post("/api/chat/sessions", { preHandler: requireUser }, async (request, reply) => {
+  const userId = getUserIdFromRequest(request)!;
+  const payload = request.body as {
+    id?: string;
+    project_id?: number;
+    title?: string;
+    model_id?: number | null;
+    output_mode?: string;
+    analysis_scope?: string;
+    repo_ids?: number[];
+  };
+  const projectId = Number(payload.project_id);
+  if (!projectId) return badRequest(reply, "请指定 project_id");
+  if (!getProject(projectId)) return notFound(reply, "项目不存在");
+  return createChatSession({
+    userId,
+    id: payload.id,
+    projectId,
+    title: payload.title,
+    modelId: payload.model_id ?? null,
+    outputMode: payload.output_mode,
+    analysisScope: payload.analysis_scope,
+    repoIds: payload.repo_ids ?? [],
+  });
+});
+
+app.get("/api/chat/sessions/:sessionId", { preHandler: requireUser }, async (request, reply) => {
+  const userId = getUserIdFromRequest(request)!;
+  const sessionId = (request.params as { sessionId: string }).sessionId;
+  const session = getChatSessionDetail(sessionId, userId);
+  if (!session) return notFound(reply, "会话不存在");
+  return session;
+});
+
+app.put("/api/chat/sessions/:sessionId", { preHandler: requireUser }, async (request, reply) => {
+  const userId = getUserIdFromRequest(request)!;
+  const sessionId = (request.params as { sessionId: string }).sessionId;
+  if (!getChatSession(sessionId, userId)) return notFound(reply, "会话不存在");
+  const payload = request.body as {
+    title?: string;
+    model_id?: number | null;
+    output_mode?: string;
+    analysis_scope?: string;
+    repo_ids?: number[];
+  };
+  return updateChatSession(sessionId, userId, payload);
+});
+
+app.delete("/api/chat/sessions/:sessionId", { preHandler: requireUser }, async (request, reply) => {
+  const userId = getUserIdFromRequest(request)!;
+  const sessionId = (request.params as { sessionId: string }).sessionId;
+  if (!getChatSession(sessionId, userId)) return notFound(reply, "会话不存在");
+  db.prepare("DELETE FROM chat_sessions WHERE id = ? AND user_id = ?").run(sessionId, userId);
+  return { ok: true };
+});
+
+app.post("/api/chat/sessions/:sessionId/messages", { preHandler: requireUser }, async (request, reply) => {
+  const userId = getUserIdFromRequest(request)!;
+  const sessionId = (request.params as { sessionId: string }).sessionId;
+  if (!getChatSession(sessionId, userId)) return notFound(reply, "会话不存在");
+  const payload = request.body as { role?: string; meta?: string; body?: string; title?: string };
+  if (!payload.role || !payload.body) return badRequest(reply, "请提供 role 和 body");
+  const message = appendChatMessage(sessionId, payload.role, payload.meta ?? "", payload.body);
+  if (payload.title?.trim()) {
+    updateChatSession(sessionId, userId, { title: payload.title.trim() });
+  } else if (payload.role === "user") {
+    maybeAutoTitleChatSession(sessionId, userId, payload.body);
+  }
+  return message;
+});
+
+app.delete("/api/chat/sessions/:sessionId/messages", { preHandler: requireUser }, async (request, reply) => {
+  const userId = getUserIdFromRequest(request)!;
+  const sessionId = (request.params as { sessionId: string }).sessionId;
+  if (!getChatSession(sessionId, userId)) return notFound(reply, "会话不存在");
+  db.prepare("DELETE FROM chat_messages WHERE session_id = ?").run(sessionId);
+  db.prepare("UPDATE chat_sessions SET updated_at = ? WHERE id = ? AND user_id = ?").run(nowIso(), sessionId, userId);
+  return { ok: true };
+});
+
+app.get("/api/tasks", { preHandler: requireAdmin }, async (request) => {
   const projectId = Number((request.query as { project_id?: string }).project_id);
   const rows = projectId
     ? db.prepare("SELECT * FROM analysis_tasks WHERE project_id = ? ORDER BY id DESC LIMIT 50").all(projectId)
@@ -419,14 +638,14 @@ app.get("/api/tasks", async (request) => {
   return rows as AnalysisTask[];
 });
 
-app.delete("/api/tasks/:taskId", async (request, reply) => {
+app.delete("/api/tasks/:taskId", { preHandler: requireAdmin }, async (request, reply) => {
   const taskId = Number((request.params as { taskId: string }).taskId);
   if (!getTask(taskId)) return notFound(reply, "分析历史不存在");
   db.prepare("DELETE FROM analysis_tasks WHERE id = ?").run(taskId);
   return { ok: true };
 });
 
-app.delete("/api/tasks", async (request) => {
+app.delete("/api/tasks", { preHandler: requireAdmin }, async (request) => {
   const projectId = Number((request.query as { project_id?: string }).project_id);
   const result = projectId
     ? db.prepare("DELETE FROM analysis_tasks WHERE project_id = ?").run(projectId)
@@ -465,13 +684,16 @@ function getTask(taskId: number): AnalysisTask | undefined {
   return db.prepare("SELECT * FROM analysis_tasks WHERE id = ?").get(taskId) as AnalysisTask | undefined;
 }
 
-function publicModel(model: AIModel): Omit<AIModel, "api_key" | "base_url"> & { api_key: string; base_url: string; configured: boolean } {
+function publicModel(model: AIModel): Omit<AIModel, "api_key" | "base_url"> & { api_key: string; base_url: string; configured: boolean; recommended: boolean } {
   const configured = Boolean(process.env.CURSOR_API_KEY?.trim() || getSetting("cursor_api_key").trim() || model.api_key);
+  const name = (model.model_name || "").toLowerCase();
+  const recommended = name === "default" || name.includes("composer-2.5") || name === "composer-2";
   return {
     ...model,
     api_key: "",
     base_url: "",
     configured,
+    recommended,
   };
 }
 
@@ -480,8 +702,12 @@ function normalizeOutputMode(mode?: string): OutputMode {
 }
 
 function normalizeAttachmentImages(images?: { url: string }[]): { url: string }[] {
+  const imageExt = /\.(png|jpe?g|gif|webp|bmp)$/i;
   return Array.isArray(images)
-    ? images.filter((image) => typeof image.url === "string" && image.url.trim()).map((image) => ({ url: image.url.trim() }))
+    ? images
+      .filter((image) => typeof image.url === "string" && image.url.trim())
+      .map((image) => ({ url: image.url.trim() }))
+      .filter((image) => image.url.startsWith("https://") || imageExt.test(image.url))
     : [];
 }
 
@@ -495,11 +721,13 @@ function isTextAttachment(fileName: string, mimeType: string): boolean {
 }
 
 function formatAttachmentForPrompt(file: UploadedAttachment): string {
+  const readPath = file.relative_path || file.workspace_path || file.path;
   const header = [
     `附件：${file.file_name}`,
     `类型：${file.mime_type || "unknown"}`,
     `大小：${file.size} bytes`,
-    `本地路径：${file.path}`,
+    `工作区相对路径：${readPath}`,
+    `读取方式：请使用 read_file 打开 ${readPath}`,
   ].join("\n");
 
   if (file.text) {
@@ -507,10 +735,255 @@ function formatAttachmentForPrompt(file: UploadedAttachment): string {
   }
 
   if (file.mime_type.startsWith("image/")) {
-    return `${header}\n图片 URL：${file.image_url || file.path}\n这是图片附件，已作为图片输入发送给 Agent。请结合图片中的界面、报错、图表或截图内容进行分析。`;
+    return `${header}\n这是图片附件，已作为图片输入发送给 Agent。请结合图片中的界面、报错、图表或截图内容进行分析。`;
   }
 
-  return `${header}\n这是非文本附件。请优先根据文件名、类型和本地路径判断是否需要读取该文件。`;
+  return `${header}\n这是非文本附件，请根据路径读取。`;
+}
+
+async function executeAnalysis(
+  payload: AnalyzePayload,
+  stream?: {
+    onStatus?: (message: string) => void;
+    onDelta?: (text: string) => void;
+    onActivity?: (activity: { kind: string; message: string }) => void;
+  },
+): Promise<{ analysis: AnalysisResult; taskId: number }> {
+  if (!payload.repo_ids?.length) throw new Error("请至少选择一个仓库");
+  const project = getProject(payload.project_id);
+  if (!project) throw new Error("项目不存在");
+
+  let repos = getReposByIds(payload.repo_ids).filter((repo) => repo.project_id === payload.project_id);
+  if (!repos.length) throw new Error("仓库与项目不匹配");
+
+  const chatSessionId = payload.chat_session_id ?? "";
+  const syncKey = buildWorkspaceSyncKey(chatSessionId, payload.project_id, payload.repo_ids);
+  const cachedAt = workspaceSyncCache.get(syncKey);
+  const canSkipSync = !payload.force_sync
+    && (payload.skip_sync || (cachedAt !== undefined && Date.now() - cachedAt < WORKSPACE_SYNC_TTL_MS))
+    && validateReposForAnalysis(payload.project_id, repos).ok;
+
+  if (canSkipSync) {
+    stream?.onStatus?.("使用本轮已同步的代码，继续分析...");
+  } else {
+    stream?.onStatus?.("正在更新仓库代码（首次或仓库变更时会较慢）...");
+    const token = getSetting("gitlab_access_token");
+    await syncReposToWorkspace(payload.project_id, repos, token);
+    workspaceSyncCache.set(syncKey, Date.now());
+    repos = getReposByIds(payload.repo_ids).filter((repo) => repo.project_id === payload.project_id);
+  }
+
+  const validation = validateReposForAnalysis(payload.project_id, repos);
+  const errors = validation.issues.filter((issue) => issue.level === "error");
+  if (errors.length) throw new Error(errors.map((issue) => issue.message).join("；"));
+
+  const warnings = validation.issues.filter((issue) => issue.level === "warning");
+  if (warnings.length) {
+    stream?.onStatus?.(warnings.map((issue) => issue.message).join("；"));
+  }
+
+  const model = payload.model_id ? getModel(payload.model_id) : getDefaultModel();
+  const question = payload.question ?? "";
+  const logText = payload.log_text ?? "";
+  const attachmentImages = normalizeAttachmentImages(payload.attachment_images);
+  const conversationContext = payload.conversation_context ?? "";
+  const outputMode = normalizeOutputMode(payload.output_mode);
+  const analysisScope = payload.analysis_scope?.trim() ?? "";
+  const analysisType = payload.analysis_type || inferAnalysisType(question, logText);
+  const chunks = searchCodeForAnalysis(repos.map((repo) => repo.id), `${question}\n${conversationContext}\n${logText}\n${analysisScope}`, analysisType);
+
+  stream?.onStatus?.("分析助手正在阅读仓库...");
+  const analysis = await analyzeWithModel(
+    model,
+    question,
+    analysisType,
+    chunks,
+    logText,
+    repos,
+    conversationContext,
+    chatSessionId,
+    outputMode,
+    attachmentImages,
+    stream,
+    analysisScope,
+  );
+
+  const insertResult = db.prepare(`
+    INSERT INTO analysis_tasks(
+      project_id, model_id, analysis_type, question, log_text, selected_repo_ids,
+      status, result, agent_id, run_id, workspace_path, analysis_scope, created_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)
+  `).run(
+    payload.project_id,
+    model?.id ?? null,
+    analysisType,
+    question,
+    logText,
+    payload.repo_ids.join(","),
+    analysis.text,
+    analysis.agentId ?? "",
+    analysis.runId ?? "",
+    analysis.workspacePath ?? validation.workspace_path,
+    analysisScope,
+    nowIso(),
+  );
+
+  return { analysis, taskId: Number(insertResult.lastInsertRowid) };
+}
+
+function buildWorkspaceSyncKey(chatSessionId: string, projectId: number, repoIds: number[]): string {
+  return `${chatSessionId || "default"}::${projectId}::${[...repoIds].sort((a, b) => a - b).join(",")}`;
+}
+
+function generateChatSessionId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function assertChatSessionOwned(
+  sessionId: string | undefined,
+  userId: number,
+  reply: FastifyReply,
+): boolean {
+  if (!sessionId?.trim()) return true;
+  if (getChatSession(sessionId, userId)) return true;
+  reply.status(404).send({ detail: "会话不存在或无权访问" });
+  return false;
+}
+
+function getChatSession(sessionId: string, userId: number): ChatSession | undefined {
+  const row = db.prepare("SELECT * FROM chat_sessions WHERE id = ? AND user_id = ?").get(sessionId, userId) as ChatSession | undefined;
+  return row ? normalizeRow(row) : undefined;
+}
+
+function listChatSessions(userId: number, projectId?: number): ChatSession[] {
+  const rows = (projectId
+    ? db.prepare(`
+      SELECT
+        s.*,
+        COUNT(m.id) AS message_count,
+        (
+          SELECT body FROM chat_messages
+          WHERE session_id = s.id
+          ORDER BY id DESC
+          LIMIT 1
+        ) AS last_message_preview
+      FROM chat_sessions s
+      LEFT JOIN chat_messages m ON m.session_id = s.id
+      WHERE s.user_id = ? AND s.project_id = ?
+      GROUP BY s.id
+      ORDER BY s.updated_at DESC
+      LIMIT 100
+    `).all(userId, projectId)
+    : db.prepare(`
+      SELECT
+        s.*,
+        COUNT(m.id) AS message_count,
+        (
+          SELECT body FROM chat_messages
+          WHERE session_id = s.id
+          ORDER BY id DESC
+          LIMIT 1
+        ) AS last_message_preview
+      FROM chat_sessions s
+      LEFT JOIN chat_messages m ON m.session_id = s.id
+      WHERE s.user_id = ?
+      GROUP BY s.id
+      ORDER BY s.updated_at DESC
+      LIMIT 200
+    `).all(userId)) as Array<ChatSession & { message_count: number; last_message_preview?: string }>;
+  return rows.map((row) => ({
+    ...normalizeRow(row),
+    message_count: Number(row.message_count || 0),
+    last_message_preview: row.last_message_preview ? String(row.last_message_preview).slice(0, 120) : "",
+  }));
+}
+
+function getChatSessionDetail(sessionId: string, userId: number): { session: ChatSession; messages: ChatMessage[] } | undefined {
+  const session = getChatSession(sessionId, userId);
+  if (!session) return undefined;
+  const messages = db.prepare(`
+    SELECT * FROM chat_messages WHERE session_id = ? ORDER BY id ASC
+  `).all(sessionId) as ChatMessage[];
+  return { session, messages };
+}
+
+function createChatSession(input: {
+  userId: number;
+  id?: string;
+  projectId: number;
+  title?: string;
+  modelId?: number | null;
+  outputMode?: string;
+  analysisScope?: string;
+  repoIds?: number[];
+}): ChatSession {
+  const id = input.id?.trim() || generateChatSessionId();
+  const title = input.title?.trim() || "新会话";
+  const outputMode = input.outputMode === "developer" ? "developer" : "non_developer";
+  const repoIds = (input.repoIds ?? []).join(",");
+  const timestamp = nowIso();
+  db.prepare(`
+    INSERT INTO chat_sessions(id, user_id, project_id, title, model_id, output_mode, analysis_scope, repo_ids, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id,
+    input.userId,
+    input.projectId,
+    title,
+    input.modelId ?? null,
+    outputMode,
+    input.analysisScope?.trim() ?? "",
+    repoIds,
+    timestamp,
+    timestamp,
+  );
+  return getChatSession(id, input.userId)!;
+}
+
+function updateChatSession(
+  sessionId: string,
+  userId: number,
+  payload: {
+    title?: string;
+    model_id?: number | null;
+    output_mode?: string;
+    analysis_scope?: string;
+    repo_ids?: number[];
+  },
+): ChatSession {
+  const current = getChatSession(sessionId, userId)!;
+  const title = payload.title?.trim() || current.title;
+  const modelId = payload.model_id === undefined ? current.model_id : payload.model_id;
+  const outputMode = payload.output_mode === "developer" || payload.output_mode === "non_developer"
+    ? payload.output_mode
+    : current.output_mode;
+  const analysisScope = payload.analysis_scope === undefined ? current.analysis_scope : payload.analysis_scope.trim();
+  const repoIds = payload.repo_ids === undefined ? current.repo_ids : payload.repo_ids.join(",");
+  db.prepare(`
+    UPDATE chat_sessions
+    SET title = ?, model_id = ?, output_mode = ?, analysis_scope = ?, repo_ids = ?, updated_at = ?
+    WHERE id = ? AND user_id = ?
+  `).run(title, modelId, outputMode, analysisScope, repoIds, nowIso(), sessionId, userId);
+  return getChatSession(sessionId, userId)!;
+}
+
+function appendChatMessage(sessionId: string, role: string, meta: string, body: string): ChatMessage {
+  const result = db.prepare(`
+    INSERT INTO chat_messages(session_id, role, meta, body, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(sessionId, role, meta, body, nowIso());
+  db.prepare("UPDATE chat_sessions SET updated_at = ? WHERE id = ?").run(nowIso(), sessionId);
+  return db.prepare("SELECT * FROM chat_messages WHERE id = ?").get(Number(result.lastInsertRowid)) as ChatMessage;
+}
+
+function maybeAutoTitleChatSession(sessionId: string, userId: number, body: string): void {
+  const session = getChatSession(sessionId, userId);
+  if (!session || session.title !== "新会话") return;
+  const count = db.prepare("SELECT COUNT(*) AS count FROM chat_messages WHERE session_id = ? AND role = 'user'").get(sessionId) as { count: number };
+  if (count.count > 1) return;
+  const title = body.replace(/\s+/g, " ").trim().slice(0, 40) || "新会话";
+  updateChatSession(sessionId, userId, { title });
 }
 
 function normalizeProjectName(name = ""): string {
