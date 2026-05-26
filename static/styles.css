@@ -1165,6 +1165,24 @@ p {
   gap: 16px;
 }
 
+.admin-history-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 0 12px;
+}
+
+.admin-history-toolbar label {
+  margin: 0;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.admin-history-toolbar select {
+  min-width: 220px;
+  max-width: 360px;
+}
+
 .admin-panel-form .panel-heading {
   margin-bottom: 4px;
 }
@@ -1187,16 +1205,48 @@ p {
 }
 
 .checkbox-row {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   margin-top: 8px;
   font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
 }
 
 .checkbox-row input[type="checkbox"] {
-  width: auto;
+  width: 16px;
+  height: 16px;
   margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--primary, #2563eb);
+  cursor: pointer;
+}
+
+.analysis-settings-body label.checkbox-row,
+.admin-form-block label.checkbox-row {
+  display: inline-flex;
+  align-items: center;
+  margin-top: 14px;
+  margin-bottom: 0;
+  padding: 10px 14px;
+  border: 1px solid var(--border, #dbe3ef);
+  border-radius: 10px;
+  background: #f8fafc;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.analysis-settings-body label.checkbox-row:hover,
+.admin-form-block label.checkbox-row:hover {
+  border-color: #c7d5e8;
+  background: #f1f5f9;
+}
+
+.analysis-settings-body label.checkbox-row:has(input:checked),
+.admin-form-block label.checkbox-row:has(input:checked) {
+  border-color: #bfdbfe;
+  background: #eff6ff;
 }
 
 input[readonly] {

@@ -80,6 +80,7 @@ interface AnalyzePayload {
 
 const workspaceSyncCache = new Map<string, number>();
 const WORKSPACE_SYNC_TTL_MS = 1000 * 60 * 60 * 3;
+const MAX_CHAT_SESSIONS_PER_USER = 10;
 
 const app = Fastify({ logger: true, bodyLimit: 5 * 1024 * 1024 });
 
@@ -458,7 +459,7 @@ app.post("/api/analyze", { preHandler: requireUser }, async (request, reply) => 
   if (!payload.repo_ids?.length) return badRequest(reply, "请至少选择一个仓库");
   const userId = getUserIdFromRequest(request)!;
   if (!assertChatSessionOwned(payload.chat_session_id, userId, reply)) return;
-  const { taskId } = await executeAnalysis(payload);
+  const { taskId } = await executeAnalysis(payload, userId);
   return getTask(taskId);
 });
 
@@ -480,7 +481,7 @@ app.post("/api/analyze/stream", { preHandler: requireUser }, async (request, rep
 
   try {
     send("status", { message: "准备分析上下文" });
-    const { taskId } = await executeAnalysis(payload, {
+    const { taskId } = await executeAnalysis(payload, userId, {
       onStatus: (message) => send("status", { message }),
       onDelta: (text) => send("delta", { text }),
       onActivity: (activity) => send("activity", activity),
@@ -564,6 +565,9 @@ app.post("/api/chat/sessions", { preHandler: requireUser }, async (request, repl
   const projectId = Number(payload.project_id);
   if (!projectId) return badRequest(reply, "请指定 project_id");
   if (!getProject(projectId)) return notFound(reply, "项目不存在");
+  if (countUserChatSessions(userId) >= MAX_CHAT_SESSIONS_PER_USER) {
+    return badRequest(reply, chatSessionLimitMessage());
+  }
   return createChatSession({
     userId,
     id: payload.id,
@@ -631,11 +635,10 @@ app.delete("/api/chat/sessions/:sessionId/messages", { preHandler: requireUser }
 });
 
 app.get("/api/tasks", { preHandler: requireAdmin }, async (request) => {
-  const projectId = Number((request.query as { project_id?: string }).project_id);
-  const rows = projectId
-    ? db.prepare("SELECT * FROM analysis_tasks WHERE project_id = ? ORDER BY id DESC LIMIT 50").all(projectId)
-    : db.prepare("SELECT * FROM analysis_tasks ORDER BY id DESC LIMIT 50").all();
-  return rows as AnalysisTask[];
+  const query = request.query as { project_id?: string; user_id?: string };
+  const projectId = Number(query.project_id) || 0;
+  const userId = Number(query.user_id) || 0;
+  return listAnalysisTasks({ projectId, userId });
 });
 
 app.delete("/api/tasks/:taskId", { preHandler: requireAdmin }, async (request, reply) => {
@@ -646,10 +649,20 @@ app.delete("/api/tasks/:taskId", { preHandler: requireAdmin }, async (request, r
 });
 
 app.delete("/api/tasks", { preHandler: requireAdmin }, async (request) => {
-  const projectId = Number((request.query as { project_id?: string }).project_id);
-  const result = projectId
-    ? db.prepare("DELETE FROM analysis_tasks WHERE project_id = ?").run(projectId)
-    : db.prepare("DELETE FROM analysis_tasks").run();
+  const query = request.query as { project_id?: string; user_id?: string };
+  const projectId = Number(query.project_id) || 0;
+  const userId = Number(query.user_id) || 0;
+  let sql = "DELETE FROM analysis_tasks WHERE 1=1";
+  const params: number[] = [];
+  if (projectId) {
+    sql += " AND project_id = ?";
+    params.push(projectId);
+  }
+  if (userId) {
+    sql += " AND user_id = ?";
+    params.push(userId);
+  }
+  const result = db.prepare(sql).run(...params);
   return { ok: true, deleted: result.changes };
 });
 
@@ -682,6 +695,31 @@ function getDefaultModel(): AIModel | undefined {
 
 function getTask(taskId: number): AnalysisTask | undefined {
   return db.prepare("SELECT * FROM analysis_tasks WHERE id = ?").get(taskId) as AnalysisTask | undefined;
+}
+
+function listAnalysisTasks(filters: { projectId?: number; userId?: number } = {}): AnalysisTask[] {
+  const projectId = filters.projectId || 0;
+  const userId = filters.userId || 0;
+  let sql = `
+    SELECT
+      t.*,
+      u.account AS user_account,
+      COALESCE(NULLIF(u.display_name, ''), u.account) AS user_display_name
+    FROM analysis_tasks t
+    LEFT JOIN app_users u ON u.id = t.user_id
+    WHERE 1=1
+  `;
+  const params: number[] = [];
+  if (projectId) {
+    sql += " AND t.project_id = ?";
+    params.push(projectId);
+  }
+  if (userId) {
+    sql += " AND t.user_id = ?";
+    params.push(userId);
+  }
+  sql += " ORDER BY t.id DESC LIMIT 50";
+  return normalizeRows(db.prepare(sql).all(...params) as AnalysisTask[]);
 }
 
 function publicModel(model: AIModel): Omit<AIModel, "api_key" | "base_url"> & { api_key: string; base_url: string; configured: boolean; recommended: boolean } {
@@ -743,6 +781,7 @@ function formatAttachmentForPrompt(file: UploadedAttachment): string {
 
 async function executeAnalysis(
   payload: AnalyzePayload,
+  userId?: number | null,
   stream?: {
     onStatus?: (message: string) => void;
     onDelta?: (text: string) => void;
@@ -811,9 +850,9 @@ async function executeAnalysis(
   const insertResult = db.prepare(`
     INSERT INTO analysis_tasks(
       project_id, model_id, analysis_type, question, log_text, selected_repo_ids,
-      status, result, agent_id, run_id, workspace_path, analysis_scope, created_at
+      status, result, agent_id, run_id, workspace_path, analysis_scope, user_id, chat_session_id, created_at
     )
-    VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?)
+    VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     payload.project_id,
     model?.id ?? null,
@@ -826,6 +865,8 @@ async function executeAnalysis(
     analysis.runId ?? "",
     analysis.workspacePath ?? validation.workspace_path,
     analysisScope,
+    userId ?? null,
+    chatSessionId,
     nowIso(),
   );
 
@@ -838,6 +879,15 @@ function buildWorkspaceSyncKey(chatSessionId: string, projectId: number, repoIds
 
 function generateChatSessionId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function chatSessionLimitMessage(): string {
+  return `每个用户最多保留 ${MAX_CHAT_SESSIONS_PER_USER} 个会话，请先删除旧会话后再新建。`;
+}
+
+function countUserChatSessions(userId: number): number {
+  const row = db.prepare("SELECT COUNT(*) AS count FROM chat_sessions WHERE user_id = ?").get(userId) as { count: number };
+  return Number(row?.count ?? 0);
 }
 
 function assertChatSessionOwned(
@@ -918,6 +968,9 @@ function createChatSession(input: {
   analysisScope?: string;
   repoIds?: number[];
 }): ChatSession {
+  if (countUserChatSessions(input.userId) >= MAX_CHAT_SESSIONS_PER_USER) {
+    throw new Error(chatSessionLimitMessage());
+  }
   const id = input.id?.trim() || generateChatSessionId();
   const title = input.title?.trim() || "新会话";
   const outputMode = input.outputMode === "developer" ? "developer" : "non_developer";

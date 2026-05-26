@@ -4,6 +4,7 @@ const state = {
   models: [],
   tasks: [],
   users: [],
+  taskUserFilter: "",
   settings: {},
   editingProjectId: null,
   editingUserId: null,
@@ -31,7 +32,7 @@ const ADMIN_PAGES = {
   },
   history: {
     title: "分析历史",
-    desc: "查看和管理分析任务记录",
+    desc: "按前端登录用户查看和管理分析任务记录",
   },
 };
 
@@ -110,6 +111,10 @@ function switchAdminPage(page) {
   window.scrollTo({ top: 0, behavior: "smooth" });
   if (location.hash !== `#${page}`) {
     history.replaceState(null, "", `#${page}`);
+  }
+  if (page === "history") {
+    syncTaskUserFilterFromDom();
+    refreshTasksData().catch(alertError);
   }
 }
 
@@ -192,6 +197,7 @@ async function loadAll() {
 async function refreshUsersData() {
   state.users = await api("/api/admin/users");
   renderUsers();
+  renderTaskUserFilter();
 }
 
 async function refreshProjectsData() {
@@ -205,8 +211,40 @@ async function refreshProjectsData() {
 }
 
 async function refreshTasksData() {
-  state.tasks = await api("/api/tasks");
+  const query = state.taskUserFilter ? `?user_id=${encodeURIComponent(state.taskUserFilter)}` : "";
+  const list = $("taskList");
+  if (list) {
+    list.innerHTML = `<div class="item"><small>加载中...</small></div>`;
+  }
+  state.tasks = await api(`/api/tasks${query}`);
   renderTasks();
+}
+
+function syncTaskUserFilterFromDom() {
+  const select = $("taskUserFilter");
+  if (!select) return;
+  state.taskUserFilter = select.value;
+}
+
+function handleTaskUserFilterChange(event) {
+  state.taskUserFilter = event.target.value;
+  refreshTasksData().catch(alertError);
+}
+
+function renderTaskUserFilter() {
+  const select = $("taskUserFilter");
+  if (!select) return;
+  const current = state.taskUserFilter || select.value || "";
+  select.innerHTML = [
+    `<option value="">全部用户</option>`,
+    ...state.users.map((user) => {
+      const label = escapeHtml(user.display_name || user.account);
+      const account = user.account !== user.display_name ? ` (${escapeHtml(user.account)})` : "";
+      return `<option value="${user.id}">${label}${account}</option>`;
+    }),
+  ].join("");
+  select.value = current;
+  state.taskUserFilter = current;
 }
 
 function render() {
@@ -214,6 +252,7 @@ function render() {
   renderModels();
   renderSettings();
   renderUsers();
+  renderTaskUserFilter();
   renderTasks();
 }
 
@@ -364,12 +403,22 @@ function toggleGitlabTokenVisibility() {
 }
 
 function renderTasks() {
-  $("taskList").innerHTML = state.tasks.map((task) => {
+  const list = $("taskList");
+  if (!list) return;
+  if (!state.tasks.length) {
+    const userHint = state.taskUserFilter
+      ? "该用户暂无分析历史。"
+      : "暂无分析历史。";
+    list.innerHTML = `<div class="item"><small>${userHint}</small></div>`;
+    return;
+  }
+  list.innerHTML = state.tasks.map((task) => {
     const project = state.projects.find((item) => item.id === task.project_id);
+    const userLabel = task.user_display_name || task.user_account || "历史记录（未关联用户）";
     return `
       <div class="item">
         <strong>#${task.id} ${escapeHtml(project?.name || "未知项目")}</strong>
-        <small>${escapeHtml(task.analysis_type)} · ${escapeHtml(task.question)}</small>
+        <small>用户：${escapeHtml(userLabel)} · ${escapeHtml(task.analysis_type)} · ${escapeHtml(task.question)}</small>
         <div class="actions">
           <button data-delete-task="${task.id}" class="danger">删除</button>
         </div>
@@ -539,12 +588,15 @@ function requestDeleteTask(taskId) {
 
 function requestClearTasks() {
   if (!state.tasks.length) return;
+  const user = state.users.find((item) => String(item.id) === String(state.taskUserFilter));
+  const scopeLabel = user ? `「${user.display_name || user.account}」的` : "全部";
   openConfirmModal({
     title: "确认清空",
-    message: "确定清空全部分析历史吗？此操作不可恢复。",
+    message: `确定清空${scopeLabel}分析历史吗？此操作不可恢复。`,
     confirmText: "确认清空",
     action: async () => {
-      await api("/api/tasks", { method: "DELETE" });
+      const query = state.taskUserFilter ? `?user_id=${encodeURIComponent(state.taskUserFilter)}` : "";
+      await api(`/api/tasks${query}`, { method: "DELETE" });
       await refreshTasksData();
     },
   });
@@ -632,6 +684,9 @@ $("saveGitlabToken").addEventListener("click", () => saveGitlabToken().catch(ale
 $("toggleGitlabToken")?.addEventListener("click", toggleGitlabTokenVisibility);
 $("refreshModels").addEventListener("click", () => loadAll().catch(alertError));
 $("clearTasks").addEventListener("click", () => requestClearTasks());
+$("adminScreen")?.addEventListener("change", (event) => {
+  if (event.target?.id === "taskUserFilter") handleTaskUserFilterChange(event);
+});
 
 $("modelList").addEventListener("click", (event) => {
   const modelId = event.target?.dataset?.defaultModel;

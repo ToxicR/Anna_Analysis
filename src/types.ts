@@ -55,6 +55,10 @@ export interface AnalysisTask {
   run_id?: string;
   workspace_path?: string;
   analysis_scope?: string;
+  user_id?: number | null;
+  chat_session_id?: string;
+  user_account?: string;
+  user_display_name?: string;
   created_at: string;
 }
 

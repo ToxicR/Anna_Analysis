@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>管理后台 · Anna Analysis</title>
   <link rel="icon" type="image/png" href="/static/assets/anna-logo.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260520-auth-fix">
+  <link rel="stylesheet" href="/static/styles.css?v=20260520-checkbox-row">
 </head>
 <body class="admin-page">
   <section id="loginScreen" class="admin-login">
@@ -158,9 +158,9 @@
               <div class="admin-form-block">
                 <label for="newUserDisplayName">显示名称（可选）</label>
                 <input id="newUserDisplayName" placeholder="例如：张三">
-                <label class="checkbox-row">
+                <label class="checkbox-row" for="newUserEnabled">
                   <input id="newUserEnabled" type="checkbox" checked>
-                  启用账号
+                  <span>启用账号</span>
                 </label>
               </div>
             </div>
@@ -179,7 +179,13 @@
               <h2>分析历史</h2>
               <button id="clearTasks" type="button" class="danger">清空</button>
             </div>
-            <p class="panel-intro">查看和管理已执行的分析任务记录。</p>
+            <p class="panel-intro">按前端登录用户查看和管理已执行的分析任务记录。</p>
+            <div class="admin-history-toolbar">
+              <label for="taskUserFilter">用户</label>
+              <select id="taskUserFilter">
+                <option value="">全部用户</option>
+              </select>
+            </div>
             <div id="taskList" class="list history admin-list"></div>
           </section>
         </section>
@@ -203,9 +209,9 @@
         <label>显示名称</label>
         <input id="editUserDisplayName" placeholder="显示在前端页右上角">
 
-        <label class="checkbox-row">
+        <label class="checkbox-row" for="editUserEnabled">
           <input id="editUserEnabled" type="checkbox">
-          启用账号
+          <span>启用账号</span>
         </label>
 
         <label>新密码（留空则不修改）</label>
@@ -270,6 +276,6 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260520-auth-fix"></script>
+  <script src="/static/admin.js?v=20260520-history-backfill"></script>
 </body>
 </html>

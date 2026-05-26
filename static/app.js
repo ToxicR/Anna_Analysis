@@ -73,6 +73,7 @@ const SECTION_CARD_META = {
 };
 
 const NEW_CHAT_HEADLINE = "想让我帮你分析些什么？";
+const MAX_CHAT_SESSIONS_PER_USER = 10;
 
 const state = {
   projects: [],
@@ -414,7 +415,28 @@ function renderChatProjectContext() {
   el.title = parts.join(" · ");
 }
 
+function isSessionLimitReached() {
+  return state.allChatSessions.length >= MAX_CHAT_SESSIONS_PER_USER;
+}
+
+function sessionLimitMessage() {
+  return `每个用户最多保留 ${MAX_CHAT_SESSIONS_PER_USER} 个会话，请先删除旧会话后再新建。`;
+}
+
+function assertCanCreateSession() {
+  if (isSessionLimitReached()) throw new Error(sessionLimitMessage());
+}
+
+function updateNewSessionButton() {
+  const button = $("newChatSession");
+  if (!button) return;
+  const limited = isSessionLimitReached();
+  button.disabled = limited;
+  button.title = limited ? sessionLimitMessage() : "";
+}
+
 function openNewChatLanding() {
+  assertCanCreateSession();
   if (!state.projects.length) {
     throw new Error("请先在管理后台添加项目（访问 /admin）");
   }
@@ -444,6 +466,7 @@ async function ensureActiveSession() {
 }
 
 async function createNewChatSession(options = {}) {
+  assertCanCreateSession();
   const projectId = getCurrentProjectId();
   if (!projectId) throw new Error("请先选择项目");
   const repoIds = getSelectedRepoIds();
@@ -585,6 +608,7 @@ function renderSidebarSessionList() {
   if (!container) return;
   if (!state.allChatSessions.length) {
     container.innerHTML = `<div class="session-empty">暂无会话记录</div>`;
+    updateNewSessionButton();
     return;
   }
 
@@ -633,6 +657,7 @@ function renderSidebarSessionList() {
       </section>
     `;
   }).join("");
+  updateNewSessionButton();
 }
 
 async function deleteChatSession(sessionId) {

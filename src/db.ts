@@ -175,6 +175,44 @@ function migrateAnalysisTaskColumns(): void {
   if (!names.has("run_id")) db.exec("ALTER TABLE analysis_tasks ADD COLUMN run_id TEXT DEFAULT ''");
   if (!names.has("workspace_path")) db.exec("ALTER TABLE analysis_tasks ADD COLUMN workspace_path TEXT DEFAULT ''");
   if (!names.has("analysis_scope")) db.exec("ALTER TABLE analysis_tasks ADD COLUMN analysis_scope TEXT DEFAULT ''");
+  if (!names.has("user_id")) {
+    db.exec("ALTER TABLE analysis_tasks ADD COLUMN user_id INTEGER REFERENCES app_users(id) ON DELETE SET NULL");
+    db.exec("CREATE INDEX IF NOT EXISTS ix_analysis_tasks_user_id ON analysis_tasks(user_id)");
+  }
+  if (!names.has("chat_session_id")) {
+    db.exec("ALTER TABLE analysis_tasks ADD COLUMN chat_session_id TEXT DEFAULT ''");
+    db.exec("CREATE INDEX IF NOT EXISTS ix_analysis_tasks_chat_session_id ON analysis_tasks(chat_session_id)");
+  }
+  backfillAnalysisTaskUsers();
+}
+
+function backfillAnalysisTaskUsers(): void {
+  db.exec(`
+    UPDATE analysis_tasks
+    SET user_id = (
+      SELECT cs.user_id
+      FROM chat_messages cm
+      INNER JOIN chat_sessions cs ON cs.id = cm.session_id
+      WHERE cm.role = 'user'
+        AND TRIM(cm.body) = TRIM(analysis_tasks.question)
+        AND cs.user_id IS NOT NULL
+      ORDER BY cm.id DESC
+      LIMIT 1
+    )
+    WHERE user_id IS NULL
+  `);
+  db.exec(`
+    UPDATE analysis_tasks
+    SET chat_session_id = (
+      SELECT cm.session_id
+      FROM chat_messages cm
+      WHERE cm.role = 'user'
+        AND TRIM(cm.body) = TRIM(analysis_tasks.question)
+      ORDER BY cm.id DESC
+      LIMIT 1
+    )
+    WHERE chat_session_id IS NULL OR chat_session_id = ''
+  `);
 }
 
 export function getSetting(key: string): string {
