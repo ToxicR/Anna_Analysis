@@ -93,7 +93,11 @@
           </section>
 
           <section class="panel">
-            <h2>已添加项目</h2>
+            <div class="panel-heading">
+              <h2>已添加项目</h2>
+              <button id="syncAllProjects" type="button">同步所有项目代码</button>
+            </div>
+            <p id="projectSyncStatus" class="panel-intro">项目创建后会自动在后台同步代码，也可手动同步。</p>
             <div id="projectList" class="list admin-list"></div>
           </section>
         </section>
@@ -152,8 +156,7 @@
               <div class="admin-form-block">
                 <label for="newUserAccount">登录账号</label>
                 <input id="newUserAccount" placeholder="例如：13800138000" autocomplete="off">
-                <label for="newUserPassword">登录密码</label>
-                <input id="newUserPassword" type="password" placeholder="设置初始密码" autocomplete="new-password">
+                <p class="field-hint">初始密码固定为 <strong>123456</strong>，用户首次登录后须自行修改。</p>
               </div>
               <div class="admin-form-block">
                 <label for="newUserDisplayName">显示名称（可选）</label>
@@ -214,8 +217,15 @@
           <span>启用账号</span>
         </label>
 
+        <label class="checkbox-row" for="editUserProjectAccessAll">
+          <input id="editUserProjectAccessAll" type="checkbox">
+          <span>允许访问全部项目</span>
+        </label>
+        <div id="editUserProjectAccessList" class="admin-check-list"></div>
+        <p class="field-hint">取消“全部项目”后，只能访问勾选的项目。</p>
+
         <label>新密码（留空则不修改）</label>
-        <input id="editUserPassword" type="password" placeholder="如需重置密码请填写" autocomplete="new-password">
+        <input id="editUserPassword" type="password" placeholder="重置后用户下次登录须修改密码" autocomplete="new-password">
 
         <button id="saveEditUser" type="button" class="primary full">保存修改</button>
       </div>
@@ -276,6 +286,6 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260520-history-backfill"></script>
+  <script src="/static/admin.js?v=20260528-user-project-access"></script>
 </body>
 </html>

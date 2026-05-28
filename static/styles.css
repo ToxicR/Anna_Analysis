@@ -1014,6 +1014,7 @@ p {
 }
 
 #loginScreen[hidden],
+#changePasswordScreen[hidden],
 #adminScreen[hidden],
 #appScreen[hidden],
 .admin-page-panel[hidden] {
@@ -1247,6 +1248,27 @@ p {
 .admin-form-block label.checkbox-row:has(input:checked) {
   border-color: #bfdbfe;
   background: #eff6ff;
+}
+
+.admin-check-list {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 4px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+  max-height: 180px;
+  overflow: auto;
+}
+
+.admin-check-list[hidden] {
+  display: none;
+}
+
+.admin-check-list .checkbox-row {
+  margin: 0;
+  padding: 2px 0;
 }
 
 input[readonly] {

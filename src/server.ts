@@ -17,7 +17,7 @@ import {
   setAdminSessionCookie,
   verifyAdminCredentials,
 } from "./auth.js";
-import { db, boolToInt, getSetting, initDb, normalizeRow, normalizeRows, nowIso, setSetting } from "./db.js";
+import { db, boolToInt, flagToBoolean, getSetting, initDb, normalizeRow, normalizeRows, nowIso, setSetting } from "./db.js";
 import { STATIC_DIR, UPLOAD_DIR } from "./paths.js";
 import { inferAnalysisType, analyzeWithModel, startCursorSessionMaintenance, type AnalysisResult, type OutputMode } from "./services/ai.js";
 import { initCodeFts } from "./services/code-fts.js";
@@ -26,6 +26,7 @@ import { deleteProjectCascade, deleteRepoCascade } from "./services/project-dele
 import { syncCursorModels } from "./services/cursor-models.js";
 import {
   createAppUser,
+  changeAppUserPassword,
   deleteAppUser,
   getAppUserById,
   listAppUsers,
@@ -78,9 +79,24 @@ interface AnalyzePayload {
   force_sync?: boolean;
 }
 
+interface ProjectSyncSummary {
+  project_id: number;
+  project_name: string;
+  synced: Awaited<ReturnType<typeof syncReposToWorkspace>>;
+  validation: ReturnType<typeof validateReposForAnalysis>;
+}
+
+interface ProjectSyncErrorSummary {
+  project_id: number;
+  project_name: string;
+  error: string;
+}
+
 const workspaceSyncCache = new Map<string, number>();
 const WORKSPACE_SYNC_TTL_MS = 1000 * 60 * 60 * 3;
 const MAX_CHAT_SESSIONS_PER_USER = 10;
+const DAILY_REPO_SYNC_HOUR = 2;
+const projectSyncJobs = new Map<number, Promise<ProjectSyncSummary>>();
 
 const app = Fastify({ logger: true, bodyLimit: 5 * 1024 * 1024 });
 
@@ -100,8 +116,22 @@ function getApiPath(url: string): string {
 app.addHook("onRequest", async (request, reply) => {
   const path = getApiPath(request.url);
   if (!path.startsWith("/api/")) return;
+  reply.header("Cache-Control", "no-store");
   if (path.startsWith("/api/admin")) return;
-  if (path === "/api/auth/login" || path === "/api/auth/logout" || path === "/api/auth/me") return;
+  if (path === "/api/auth/login" || path === "/api/auth/logout") return;
+
+  const userSession = getUserSession(request);
+  if (userSession) {
+    const user = getAppUserById(userSession.userId);
+    if (user?.enabled && flagToBoolean(user.must_change_password)) {
+      const allowedWhilePasswordChange = new Set(["/api/auth/me", "/api/auth/logout", "/api/auth/change-password"]);
+      if (!allowedWhilePasswordChange.has(path)) {
+        return reply.status(403).send({ detail: "首次登录请先修改密码", must_change_password: true });
+      }
+    }
+  }
+
+  if (path === "/api/auth/me" || path === "/api/auth/change-password") return;
 
   if (!isUserAuthenticated(request) && !isAdminAuthenticated(request)) {
     return reply.status(401).send({ detail: "请先登录" });
@@ -109,11 +139,17 @@ app.addHook("onRequest", async (request, reply) => {
 });
 
 app.get("/", async (_request, reply) => {
-  return reply.type("text/html").send(fs.createReadStream(path.join(STATIC_DIR, "index.html")));
+  return reply
+    .header("Cache-Control", "no-store")
+    .type("text/html")
+    .send(fs.createReadStream(path.join(STATIC_DIR, "index.html")));
 });
 
 app.get("/admin", async (_request, reply) => {
-  return reply.type("text/html").send(fs.createReadStream(path.join(STATIC_DIR, "admin.html")));
+  return reply
+    .header("Cache-Control", "no-store")
+    .type("text/html")
+    .send(fs.createReadStream(path.join(STATIC_DIR, "admin.html")));
 });
 
 app.get("/api/admin/me", async (request, reply) => {
@@ -145,7 +181,12 @@ app.get("/api/auth/me", async (request, reply) => {
   if (!session) return reply.status(401).send({ detail: "未登录或会话已过期" });
   const user = getAppUserById(session.userId);
   if (!user || !user.enabled) return reply.status(401).send({ detail: "账号不存在或已禁用" });
-  return { id: user.id, account: user.account, display_name: user.display_name || user.account };
+  return {
+    id: user.id,
+    account: user.account,
+    display_name: user.display_name || user.account,
+    must_change_password: flagToBoolean(user.must_change_password),
+  };
 });
 
 app.post("/api/auth/login", async (request, reply) => {
@@ -156,7 +197,19 @@ app.post("/api/auth/login", async (request, reply) => {
   if (!user) return reply.status(401).send({ detail: "账号或密码错误，或账号已禁用" });
   const token = createUserSession(user.id, user.account);
   setUserSessionCookie(reply, token);
-  return { id: user.id, account: user.account, display_name: user.display_name };
+  return user;
+});
+
+app.post("/api/auth/change-password", async (request, reply) => {
+  const session = getUserSession(request);
+  if (!session) return reply.status(401).send({ detail: "未登录或会话已过期" });
+  const payload = request.body as { current_password?: string; new_password?: string };
+  try {
+    const user = changeAppUserPassword(session.userId, payload.new_password ?? "", payload.current_password);
+    return user;
+  } catch (error) {
+    return badRequest(reply, error instanceof Error ? error.message : String(error));
+  }
 });
 
 app.post("/api/auth/logout", async (request, reply) => {
@@ -170,13 +223,14 @@ app.get("/api/admin/users", { preHandler: requireAdmin }, async () => {
 });
 
 app.post("/api/admin/users", { preHandler: requireAdmin }, async (request, reply) => {
-  const payload = request.body as { account?: string; password?: string; display_name?: string; enabled?: boolean };
+  const payload = request.body as { account?: string; display_name?: string; enabled?: boolean; project_access_all?: boolean; allowed_project_ids?: number[] };
   try {
     return createAppUser({
       account: payload.account ?? "",
-      password: payload.password ?? "",
       display_name: payload.display_name,
       enabled: payload.enabled,
+      project_access_all: payload.project_access_all,
+      allowed_project_ids: payload.allowed_project_ids,
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -189,7 +243,7 @@ app.post("/api/admin/users", { preHandler: requireAdmin }, async (request, reply
 
 app.put("/api/admin/users/:userId", { preHandler: requireAdmin }, async (request, reply) => {
   const userId = Number((request.params as { userId: string }).userId);
-  const payload = request.body as { display_name?: string; enabled?: boolean; password?: string };
+  const payload = request.body as { display_name?: string; enabled?: boolean; password?: string; project_access_all?: boolean; allowed_project_ids?: number[] };
   const user = updateAppUser(userId, payload);
   if (!user) return notFound(reply, "账号不存在");
   return user;
@@ -202,9 +256,20 @@ app.delete("/api/admin/users/:userId", { preHandler: requireAdmin }, async (requ
   return { ok: true };
 });
 
-app.get("/api/projects", async () => {
-  const rows = db.prepare("SELECT * FROM projects ORDER BY id DESC").all() as Project[];
+app.get("/api/projects", async (request) => {
+  const userId = getUserIdFromRequest(request);
+  const scope = (request.query as { scope?: string }).scope;
+  const access = userId && (scope === "user" || !isAdminAuthenticated(request)) ? getUserProjectAccess(userId) : { all: true, projectIds: [] };
+  const rows = access.all
+    ? db.prepare("SELECT * FROM projects ORDER BY id DESC").all() as Project[]
+    : access.projectIds.length
+      ? db.prepare(`SELECT * FROM projects WHERE id IN (${access.projectIds.map(() => "?").join(",")}) ORDER BY id DESC`).all(...access.projectIds) as Project[]
+      : [];
   return normalizeRows(rows);
+});
+
+app.post("/api/projects/sync", { preHandler: requireAdmin }, async () => {
+  return syncAllProjectCode();
 });
 
 app.post("/api/projects", { preHandler: requireAdmin }, async (request, reply) => {
@@ -269,9 +334,21 @@ app.post("/api/projects/with-repos", { preHandler: requireAdmin }, async (reques
   });
 
   try {
-    return tx();
+    const result = tx();
+    triggerProjectSync(result.project.id, "项目创建后自动同步代码");
+    return { ...result, sync_started: true };
   } catch (error) {
     return duplicateError(reply, error);
+  }
+});
+
+app.post("/api/projects/:projectId/sync", { preHandler: requireAdmin }, async (request, reply) => {
+  const projectId = Number((request.params as { projectId: string }).projectId);
+  if (!getProject(projectId)) return notFound(reply, "项目不存在");
+  try {
+    return syncProjectCode(projectId);
+  } catch (error) {
+    throw new Error(`同步项目代码失败：${error instanceof Error ? error.message : String(error)}`);
   }
 });
 
@@ -318,7 +395,21 @@ app.delete("/api/projects/:projectId", { preHandler: requireAdmin }, async (requ
 });
 
 app.get("/api/repos", async (request) => {
-  const projectId = Number((request.query as { project_id?: string }).project_id);
+  const query = request.query as { project_id?: string; scope?: string };
+  const projectId = Number(query.project_id);
+  const userId = getUserIdFromRequest(request);
+  if (userId && (query.scope === "user" || !isAdminAuthenticated(request))) {
+    if (projectId && !userCanAccessProject(userId, projectId)) return [];
+    const access = getUserProjectAccess(userId);
+    const rows = projectId
+      ? db.prepare("SELECT * FROM git_repos WHERE project_id = ? ORDER BY id DESC").all(projectId)
+      : access.all
+        ? db.prepare("SELECT * FROM git_repos ORDER BY id DESC").all()
+        : access.projectIds.length
+          ? db.prepare(`SELECT * FROM git_repos WHERE project_id IN (${access.projectIds.map(() => "?").join(",")}) ORDER BY id DESC`).all(...access.projectIds)
+          : [];
+    return normalizeRows(rows as GitRepo[]);
+  }
   const rows = projectId
     ? db.prepare("SELECT * FROM git_repos WHERE project_id = ? ORDER BY id DESC").all(projectId)
     : db.prepare("SELECT * FROM git_repos ORDER BY id DESC").all();
@@ -458,6 +549,7 @@ app.post("/api/analyze", { preHandler: requireUser }, async (request, reply) => 
   const payload = request.body as AnalyzePayload;
   if (!payload.repo_ids?.length) return badRequest(reply, "请至少选择一个仓库");
   const userId = getUserIdFromRequest(request)!;
+  if (!assertUserCanAccessProject(userId, payload.project_id, reply)) return;
   if (!assertChatSessionOwned(payload.chat_session_id, userId, reply)) return;
   const { taskId } = await executeAnalysis(payload, userId);
   return getTask(taskId);
@@ -466,6 +558,7 @@ app.post("/api/analyze", { preHandler: requireUser }, async (request, reply) => 
 app.post("/api/analyze/stream", { preHandler: requireUser }, async (request, reply) => {
   const payload = request.body as AnalyzePayload;
   const userId = getUserIdFromRequest(request)!;
+  if (!assertUserCanAccessProject(userId, payload.project_id, reply)) return;
   if (!assertChatSessionOwned(payload.chat_session_id, userId, reply)) return;
 
   reply.raw.writeHead(200, {
@@ -500,6 +593,7 @@ app.post("/api/analyze/upload-log", { preHandler: requireUser }, async (request,
   const projectId = Number(query.project_id);
   const chatSessionId = String(query.chat_session_id || "");
   const userId = getUserIdFromRequest(request)!;
+  if (projectId && !assertUserCanAccessProject(userId, projectId, reply)) return;
   if (!assertChatSessionOwned(chatSessionId || undefined, userId, reply)) return;
 
   const uploaded: UploadedAttachment[] = [];
@@ -546,9 +640,10 @@ app.get("/api/chat/sessions", { preHandler: requireUser }, async (request, reply
   const projectId = Number((request.query as { project_id?: string }).project_id);
   if (projectId) {
     if (!getProject(projectId)) return notFound(reply, "项目不存在");
+    if (!assertUserCanAccessProject(userId, projectId, reply)) return;
     return listChatSessions(userId, projectId);
   }
-  return listChatSessions(userId);
+  return listChatSessions(userId).filter((session) => userCanAccessProject(userId, Number(session.project_id)));
 });
 
 app.post("/api/chat/sessions", { preHandler: requireUser }, async (request, reply) => {
@@ -565,6 +660,8 @@ app.post("/api/chat/sessions", { preHandler: requireUser }, async (request, repl
   const projectId = Number(payload.project_id);
   if (!projectId) return badRequest(reply, "请指定 project_id");
   if (!getProject(projectId)) return notFound(reply, "项目不存在");
+  if (!assertUserCanAccessProject(userId, projectId, reply)) return;
+  if (!assertUserCanUseRepos(userId, projectId, payload.repo_ids ?? [], reply)) return;
   if (countUserChatSessions(userId) >= MAX_CHAT_SESSIONS_PER_USER) {
     return badRequest(reply, chatSessionLimitMessage());
   }
@@ -585,13 +682,16 @@ app.get("/api/chat/sessions/:sessionId", { preHandler: requireUser }, async (req
   const sessionId = (request.params as { sessionId: string }).sessionId;
   const session = getChatSessionDetail(sessionId, userId);
   if (!session) return notFound(reply, "会话不存在");
+  if (!assertUserCanAccessProject(userId, Number(session.session.project_id), reply)) return;
   return session;
 });
 
 app.put("/api/chat/sessions/:sessionId", { preHandler: requireUser }, async (request, reply) => {
   const userId = getUserIdFromRequest(request)!;
   const sessionId = (request.params as { sessionId: string }).sessionId;
-  if (!getChatSession(sessionId, userId)) return notFound(reply, "会话不存在");
+  const session = getChatSession(sessionId, userId);
+  if (!session) return notFound(reply, "会话不存在");
+  if (!assertUserCanAccessProject(userId, Number(session.project_id), reply)) return;
   const payload = request.body as {
     title?: string;
     model_id?: number | null;
@@ -599,6 +699,7 @@ app.put("/api/chat/sessions/:sessionId", { preHandler: requireUser }, async (req
     analysis_scope?: string;
     repo_ids?: number[];
   };
+  if (!assertUserCanUseRepos(userId, Number(session.project_id), payload.repo_ids ?? [], reply)) return;
   return updateChatSession(sessionId, userId, payload);
 });
 
@@ -669,6 +770,39 @@ app.delete("/api/tasks", { preHandler: requireAdmin }, async (request) => {
 function getProject(projectId: number): Project | undefined {
   const row = db.prepare("SELECT * FROM projects WHERE id = ?").get(projectId) as Project | undefined;
   return row ? normalizeRow(row) : undefined;
+}
+
+function getUserProjectAccess(userId: number): { all: boolean; projectIds: number[] } {
+  const user = getAppUserById(userId);
+  if (!user || flagToBoolean(user.project_access_all ?? true)) return { all: true, projectIds: [] };
+  const rows = db.prepare("SELECT project_id FROM app_user_projects WHERE user_id = ? ORDER BY project_id ASC").all(userId) as Array<{ project_id: number }>;
+  return { all: false, projectIds: rows.map((row) => Number(row.project_id)) };
+}
+
+function userCanAccessProject(userId: number, projectId: number): boolean {
+  if (!projectId) return false;
+  const access = getUserProjectAccess(userId);
+  return access.all || access.projectIds.includes(projectId);
+}
+
+function assertUserCanAccessProject(userId: number, projectId: number, reply: FastifyReply): boolean {
+  if (userCanAccessProject(userId, projectId)) return true;
+  reply.status(403).send({ detail: "无权访问该项目" });
+  return false;
+}
+
+function assertUserCanUseRepos(userId: number, projectId: number, repoIds: number[], reply: FastifyReply): boolean {
+  if (!repoIds.length) return true;
+  if (!userCanAccessProject(userId, projectId)) {
+    reply.status(403).send({ detail: "无权访问该项目" });
+    return false;
+  }
+  const repos = getReposByIds(repoIds);
+  if (repos.length !== repoIds.length || repos.some((repo) => repo.project_id !== projectId)) {
+    reply.status(403).send({ detail: "无权使用所选仓库" });
+    return false;
+  }
+  return true;
 }
 
 function getRepo(repoId: number): GitRepo | undefined {
@@ -791,6 +925,9 @@ async function executeAnalysis(
   if (!payload.repo_ids?.length) throw new Error("请至少选择一个仓库");
   const project = getProject(payload.project_id);
   if (!project) throw new Error("项目不存在");
+  if (userId && !userCanAccessProject(userId, payload.project_id)) {
+    throw new Error("无权访问该项目");
+  }
 
   let repos = getReposByIds(payload.repo_ids).filter((repo) => repo.project_id === payload.project_id);
   if (!repos.length) throw new Error("仓库与项目不匹配");
@@ -1076,6 +1213,88 @@ function applyRepoSlot(projectId: number, projectName: string, kind: "Android" |
   }
 }
 
+function getEnabledReposForProject(projectId: number): GitRepo[] {
+  const rows = db.prepare("SELECT * FROM git_repos WHERE project_id = ? AND enabled = 1 ORDER BY id DESC").all(projectId) as GitRepo[];
+  return normalizeRows(rows);
+}
+
+async function doSyncProjectCode(projectId: number): Promise<ProjectSyncSummary> {
+  const project = getProject(projectId);
+  if (!project) throw new Error("项目不存在");
+  const repos = getEnabledReposForProject(projectId);
+  if (!repos.length) throw new Error("项目未配置可同步的仓库");
+  const token = getSetting("gitlab_access_token");
+  const synced = await syncReposToWorkspace(projectId, repos, token);
+  const refreshed = getEnabledReposForProject(projectId);
+  const validation = validateReposForAnalysis(projectId, refreshed);
+  return {
+    project_id: project.id,
+    project_name: project.name,
+    synced,
+    validation,
+  };
+}
+
+async function syncProjectCode(projectId: number): Promise<ProjectSyncSummary> {
+  const existing = projectSyncJobs.get(projectId);
+  if (existing) return existing;
+  const job = doSyncProjectCode(projectId).finally(() => {
+    projectSyncJobs.delete(projectId);
+  });
+  projectSyncJobs.set(projectId, job);
+  return job;
+}
+
+async function syncAllProjectCode(): Promise<{ results: Array<ProjectSyncSummary | ProjectSyncErrorSummary> }> {
+  const projects = normalizeRows(db.prepare("SELECT * FROM projects WHERE enabled = 1 ORDER BY id ASC").all() as Project[]);
+  const results: Array<ProjectSyncSummary | ProjectSyncErrorSummary> = [];
+  for (const project of projects) {
+    try {
+      results.push(await syncProjectCode(project.id));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      results.push({ project_id: project.id, project_name: project.name, error: message });
+      app.log.error({ projectId: project.id, err: error }, "project code sync failed");
+    }
+  }
+  return { results };
+}
+
+function triggerProjectSync(projectId: number, reason: string): void {
+  void syncProjectCode(projectId)
+    .then((result) => {
+      app.log.info({ projectId, repoCount: result.synced.length, reason }, "project code sync completed");
+    })
+    .catch((error) => {
+      app.log.error({ projectId, err: error, reason }, "project code sync failed");
+    });
+}
+
+function msUntilNextDailyRepoSync(): number {
+  const now = new Date();
+  const next = new Date(now);
+  next.setHours(DAILY_REPO_SYNC_HOUR, 0, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+  return next.getTime() - now.getTime();
+}
+
+function scheduleDailyRepoSync(): void {
+  const scheduleNext = () => {
+    const timer = setTimeout(() => {
+      void syncAllProjectCode()
+        .then((summary) => {
+          app.log.info({ projectCount: summary.results.length }, "daily project code sync completed");
+        })
+        .catch((error) => {
+          app.log.error({ err: error }, "daily project code sync failed");
+        })
+        .finally(scheduleNext);
+    }, msUntilNextDailyRepoSync());
+    timer.unref?.();
+  };
+  scheduleNext();
+}
+
 function badRequest(reply: FastifyReply, message: string) {
   return reply.status(400).send({ detail: message });
 }
@@ -1099,3 +1318,4 @@ const port = Number(process.env.PORT || 8765);
 const host = process.env.HOST || "127.0.0.1";
 
 await app.listen({ port, host });
+scheduleDailyRepoSync();

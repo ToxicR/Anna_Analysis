@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Anna Analysis</title>
   <link rel="icon" type="image/png" href="/static/assets/anna-logo.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260520-no-flash">
+  <link rel="stylesheet" href="/static/styles.css?v=20260528-password-flow-fix5">
   <style>
     #appScreen:not([hidden]) .app-shell {
       display: grid;
@@ -35,6 +35,25 @@
       <input id="loginPassword" name="password" type="password" autocomplete="current-password" placeholder="请输入密码" required>
       <p id="loginError" class="login-error" hidden></p>
       <button id="loginSubmit" type="submit" class="primary full">登录</button>
+    </form>
+  </section>
+
+  <section id="changePasswordScreen" class="admin-login" hidden>
+    <form id="changePasswordForm" class="login-card" novalidate>
+      <div class="login-brand">
+        <img class="brand-mark" src="/static/assets/anna-logo.png" alt="Anna logo">
+        <div>
+          <h1>修改登录密码</h1>
+          <p>首次登录须修改初始密码后才能使用系统</p>
+        </div>
+      </div>
+      <label for="changeNewPassword">新密码</label>
+      <input id="changeNewPassword" name="new_password" type="password" autocomplete="new-password" placeholder="至少 6 位，且不能为 123456" required>
+      <label for="changeConfirmPassword">确认新密码</label>
+      <input id="changeConfirmPassword" name="confirm_password" type="password" autocomplete="new-password" placeholder="再次输入新密码" required>
+      <p id="changePasswordError" class="login-error" hidden></p>
+      <button id="changePasswordSubmit" type="submit" class="primary full">保存并进入</button>
+      <button id="changePasswordLogout" type="button" class="full">退出登录</button>
     </form>
   </section>
 
@@ -166,6 +185,6 @@
   </div>
   </div>
 
-  <script src="/static/app.js?v=20260520-session-limit"></script>
+  <script src="/static/app.js?v=20260528-project-access-scope"></script>
 </body>
 </html>

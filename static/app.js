@@ -109,6 +109,7 @@ async function api(path, options = {}) {
     ...options,
     headers: Object.keys(headers).length ? headers : undefined,
     credentials: "same-origin",
+    cache: "no-store",
   });
   if (!response.ok) {
     const text = await response.text();
@@ -132,6 +133,7 @@ async function api(path, options = {}) {
 
 function showLogin(message = "") {
   $("appScreen").hidden = true;
+  $("changePasswordScreen").hidden = true;
   hideMainPanels();
   $("loginScreen").hidden = false;
   const errorEl = $("loginError");
@@ -144,8 +146,24 @@ function showLogin(message = "") {
   }
 }
 
+function showChangePasswordScreen(message = "") {
+  $("loginScreen").hidden = true;
+  $("appScreen").hidden = true;
+  hideMainPanels();
+  $("changePasswordScreen").hidden = false;
+  const errorEl = $("changePasswordError");
+  if (message) {
+    errorEl.textContent = message;
+    errorEl.hidden = false;
+  } else {
+    errorEl.hidden = true;
+    errorEl.textContent = "";
+  }
+}
+
 function showApp() {
   $("loginScreen").hidden = true;
+  $("changePasswordScreen").hidden = true;
   $("appShell")?.classList.add("has-main-panel");
   if (state.chatPanelVisible) {
     $("newChatPanel").hidden = true;
@@ -222,10 +240,18 @@ function renderUserLabel() {
   label.textContent = user ? (user.display_name || user.account) : "";
 }
 
+function userMustChangePassword(user) {
+  return user?.must_change_password === true;
+}
+
 async function checkAuth() {
   try {
     const user = await api("/api/auth/me");
     state.currentUser = user;
+    if (userMustChangePassword(user)) {
+      showChangePasswordScreen();
+      return true;
+    }
     await loadAll();
     showApp();
     renderUserLabel();
@@ -248,6 +274,10 @@ async function login(account, password) {
       body: JSON.stringify({ account, password }),
     });
     state.currentUser = user;
+    if (userMustChangePassword(user)) {
+      showChangePasswordScreen();
+      return;
+    }
     await loadAll();
     showApp();
     renderUserLabel();
@@ -255,6 +285,55 @@ async function login(account, password) {
     if (submitBtn) {
       submitBtn.disabled = false;
       submitBtn.textContent = "登录";
+    }
+  }
+}
+
+async function submitChangePassword(event) {
+  event.preventDefault();
+  const newPassword = $("changeNewPassword").value;
+  const confirmPassword = $("changeConfirmPassword").value;
+  if (!newPassword) {
+    showChangePasswordScreen("请输入新密码");
+    $("changeNewPassword").focus();
+    return;
+  }
+  if (newPassword !== confirmPassword) {
+    showChangePasswordScreen("两次输入的新密码不一致");
+    $("changeConfirmPassword").focus();
+    return;
+  }
+  const submitBtn = $("changePasswordSubmit");
+  if (submitBtn) {
+    submitBtn.disabled = true;
+    submitBtn.textContent = "保存中...";
+  }
+  try {
+    await api("/api/auth/change-password", {
+      method: "POST",
+      body: JSON.stringify({ new_password: newPassword }),
+    });
+    const verified = await api("/api/auth/me");
+    if (userMustChangePassword(verified)) {
+      showChangePasswordScreen("密码修改未生效，请重试或联系管理员");
+      return;
+    }
+    state.currentUser = verified;
+    $("changeNewPassword").value = "";
+    $("changeConfirmPassword").value = "";
+    try {
+      await loadAll();
+    } catch (loadError) {
+      setAnalysisStatus(loadError.message || String(loadError));
+    }
+    showApp();
+    renderUserLabel();
+  } catch (error) {
+    showChangePasswordScreen(error.message || String(error));
+  } finally {
+    if (submitBtn) {
+      submitBtn.disabled = false;
+      submitBtn.textContent = "保存并进入";
     }
   }
 }
@@ -309,8 +388,8 @@ function optionList(items, labelFn) {
 
 async function loadAll() {
   const [projects, repos, models] = await Promise.all([
-    api("/api/projects"),
-    api("/api/repos"),
+    api("/api/projects?scope=user"),
+    api("/api/repos?scope=user"),
     api("/api/models"),
   ]);
   state.projects = projects;
@@ -460,9 +539,9 @@ async function refreshChatSessions() {
   await refreshAllChatSessions();
 }
 
-async function ensureActiveSession() {
+async function ensureActiveSession(options = {}) {
   if (state.activeChatSession?.id === state.chatSessionId) return;
-  await createNewChatSession({ silent: true });
+  await createNewChatSession({ silent: true, ...options });
 }
 
 async function createNewChatSession(options = {}) {
@@ -1272,6 +1351,7 @@ function updateAttachmentBar() {
 async function attachLogFiles(files) {
   const selectedFiles = [...files];
   if (!selectedFiles.length) return;
+  await ensureActiveSession({ skipLoad: true });
   const form = new FormData();
   selectedFiles.forEach((file) => form.append("files", file));
   const projectId = Number($("analysisProject").value);
@@ -1461,9 +1541,11 @@ function alertError(error) {
 
 $("loginForm")?.addEventListener("submit", submitLogin);
 $("loginSubmit")?.addEventListener("click", (event) => {
-  event.preventDefault();
+  if (event.target?.form) return;
   submitLogin(event);
 });
+$("changePasswordForm")?.addEventListener("submit", (event) => submitChangePassword(event));
+$("changePasswordLogout")?.addEventListener("click", () => logoutUser().catch(alertError));
 $("logoutUser")?.addEventListener("click", () => logoutUser().catch(alertError));
 
 checkAuth().catch(alertError);

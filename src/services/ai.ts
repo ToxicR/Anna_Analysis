@@ -363,7 +363,7 @@ async function getOrCreateCursorAgent(
         model: { id: model.model_name },
         name: "Anna Analysis",
         cloud: {
-          repos: repos.map((repo) => ({ url: repo.git_url, ref: repo.branch || "main" })),
+          repos: repos.map((repo) => ({ url: repo.git_url, startingRef: repo.branch || "main" })),
         },
       })
     : await Agent.create({
@@ -393,7 +393,7 @@ async function tryResumeCursorAgent(
       apiKey,
       model: { id: model.model_name },
       ...(useCloud
-        ? { cloud: { repos: repos.map((repo) => ({ url: repo.git_url, ref: repo.branch || "main" })) } }
+        ? { cloud: { repos: repos.map((repo) => ({ url: repo.git_url, startingRef: repo.branch || "main" })) } }
         : { local: localAgentOptions(cwd) }),
     });
   } catch (error) {

@@ -11,6 +11,9 @@ const state = {
   activePage: "projects",
   pendingConfirmAction: null,
   confirmDefaultMessage: "",
+  syncingProjectIds: new Set(),
+  syncAllLoading: false,
+  projectSyncStatus: "",
 };
 
 const ADMIN_PAGES = {
@@ -266,7 +269,7 @@ function renderUsers() {
   list.innerHTML = state.users.map((user) => `
     <div class="item">
       <strong>${escapeHtml(user.display_name || user.account)}</strong>
-      <small>${escapeHtml(user.account)} · ${user.enabled ? "已启用" : "已禁用"} · ${escapeHtml(user.created_at || "")}</small>
+      <small>${escapeHtml(user.account)} · ${user.enabled ? "已启用" : "已禁用"}${user.must_change_password ? " · 待改密" : ""} · ${escapeHtml(userProjectAccessLabel(user))} · ${escapeHtml(user.created_at || "")}</small>
       <div class="actions">
         <button data-edit-user="${user.id}">编辑</button>
         <button data-delete-user="${user.id}" class="danger">删除</button>
@@ -275,23 +278,41 @@ function renderUsers() {
   `).join("");
 }
 
+function userProjectAccessLabel(user) {
+  if (user.project_access_all) return "全部项目";
+  const ids = new Set((user.allowed_project_ids || []).map((id) => Number(id)));
+  const names = state.projects.filter((project) => ids.has(project.id)).map((project) => project.name);
+  return names.length ? `指定项目：${names.join("、")}` : "无可访问项目";
+}
+
+function formatDateTime(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("zh-CN", { hour12: false });
+}
+
+function setProjectSyncStatus(message = "") {
+  state.projectSyncStatus = message;
+  const el = $("projectSyncStatus");
+  if (el) {
+    el.textContent = message || "项目创建后会自动在后台同步代码，也可手动同步。";
+  }
+}
+
 function clearUserForm() {
   $("newUserAccount").value = "";
-  $("newUserPassword").value = "";
   $("newUserDisplayName").value = "";
   $("newUserEnabled").checked = true;
 }
 
 async function saveUser() {
   const account = $("newUserAccount").value.trim();
-  const password = $("newUserPassword").value;
   if (!account) throw new Error("请填写登录账号");
-  if (!password) throw new Error("请填写登录密码");
   await api("/api/admin/users", {
     method: "POST",
     body: JSON.stringify({
       account,
-      password,
       display_name: $("newUserDisplayName").value.trim(),
       enabled: $("newUserEnabled").checked,
     }),
@@ -310,8 +331,32 @@ function openEditUserModal(userId) {
   $("editUserDisplayName").value = user.display_name || "";
   $("editUserEnabled").checked = Boolean(user.enabled);
   $("editUserPassword").value = "";
+  $("editUserProjectAccessAll").checked = user.project_access_all !== false;
+  renderEditUserProjectAccessList(user);
   $("editUserBackdrop").hidden = false;
   $("editUserDisplayName").focus();
+}
+
+function renderEditUserProjectAccessList(user) {
+  const list = $("editUserProjectAccessList");
+  if (!list) return;
+  const accessAll = $("editUserProjectAccessAll").checked;
+  list.hidden = accessAll;
+  const allowed = new Set((user?.allowed_project_ids || []).map((id) => Number(id)));
+  list.innerHTML = state.projects.length
+    ? state.projects.map((project) => `
+      <label class="checkbox-row">
+        <input type="checkbox" value="${project.id}" ${allowed.has(project.id) ? "checked" : ""}>
+        <span>${escapeHtml(project.name)}</span>
+      </label>
+    `).join("")
+    : `<small>暂无项目</small>`;
+}
+
+function selectedEditUserProjectIds() {
+  return [...$("editUserProjectAccessList").querySelectorAll('input[type="checkbox"]:checked')]
+    .map((input) => Number(input.value))
+    .filter((id) => Number.isInteger(id) && id > 0);
 }
 
 function closeEditUserModal() {
@@ -324,6 +369,8 @@ async function saveEditUser() {
   const payload = {
     display_name: $("editUserDisplayName").value.trim(),
     enabled: $("editUserEnabled").checked,
+    project_access_all: $("editUserProjectAccessAll").checked,
+    allowed_project_ids: selectedEditUserProjectIds(),
   };
   const password = $("editUserPassword").value;
   if (password) payload.password = password;
@@ -351,14 +398,27 @@ function requestDeleteUser(userId) {
 }
 
 function renderProjects() {
+  const syncAllButton = $("syncAllProjects");
+  if (syncAllButton) {
+    syncAllButton.disabled = state.syncAllLoading || !state.projects.length;
+    syncAllButton.textContent = state.syncAllLoading ? "同步中..." : "同步所有项目代码";
+  }
+  setProjectSyncStatus(state.projectSyncStatus);
   $("projectList").innerHTML = state.projects.map((project) => {
     const repos = state.repos.filter((repo) => repo.project_id === project.id);
     const repoNames = repos.length ? repos.map((repo) => repo.name).join("、") : "暂无仓库";
+    const lastSyncAt = repos
+      .map((repo) => repo.last_sync_at)
+      .filter(Boolean)
+      .sort()
+      .pop();
+    const syncing = state.syncingProjectIds.has(project.id);
     return `
       <div class="item">
         <strong>${escapeHtml(project.name)}</strong>
-        <small>${escapeHtml(repoNames)}</small>
+        <small>${escapeHtml(repoNames)}${lastSyncAt ? ` · 最近同步：${escapeHtml(formatDateTime(lastSyncAt))}` : ""}</small>
         <div class="actions">
+          <button data-sync-project="${project.id}" ${syncing ? "disabled" : ""}>${syncing ? "同步中..." : "同步代码"}</button>
           <button data-edit-project="${project.id}">编辑</button>
           <button data-delete-project="${project.id}" class="danger">删除</button>
         </div>
@@ -497,8 +557,11 @@ function projectPayload() {
 
 async function saveProject() {
   const payload = projectPayload();
-  await api("/api/projects/with-repos", { method: "POST", body: JSON.stringify(payload) });
+  const result = await api("/api/projects/with-repos", { method: "POST", body: JSON.stringify(payload) });
   clearProjectForm();
+  if (result?.sync_started) {
+    setProjectSyncStatus(`项目「${result.project?.name || payload.name}」已保存，正在后台同步代码。`);
+  }
   await refreshProjectsData();
 }
 
@@ -508,6 +571,43 @@ async function saveEditProject() {
   await api(`/api/projects/${state.editingProjectId}/with-repos`, { method: "PUT", body: JSON.stringify(payload) });
   closeEditProjectModal();
   await refreshProjectsData();
+}
+
+function summarizeSyncResult(result) {
+  const syncedCount = result?.synced?.length || 0;
+  const issueCount = result?.validation?.issues?.length || 0;
+  return `${result.project_name || "项目"}同步完成：${syncedCount} 个仓库${issueCount ? `，${issueCount} 个提示` : ""}`;
+}
+
+async function syncProject(projectId) {
+  const project = state.projects.find((item) => item.id === projectId);
+  state.syncingProjectIds.add(projectId);
+  setProjectSyncStatus(`正在同步「${project?.name || "项目"}」代码...`);
+  renderProjects();
+  try {
+    const result = await api(`/api/projects/${projectId}/sync`, { method: "POST" });
+    setProjectSyncStatus(summarizeSyncResult(result));
+    await refreshProjectsData();
+  } finally {
+    state.syncingProjectIds.delete(projectId);
+    renderProjects();
+  }
+}
+
+async function syncAllProjects() {
+  state.syncAllLoading = true;
+  setProjectSyncStatus("正在同步所有项目代码...");
+  renderProjects();
+  try {
+    const summary = await api("/api/projects/sync", { method: "POST" });
+    const results = summary?.results || [];
+    const failed = results.filter((item) => item.error);
+    setProjectSyncStatus(`所有项目同步完成：${results.length - failed.length} 个成功${failed.length ? `，${failed.length} 个失败` : ""}`);
+    await refreshProjectsData();
+  } finally {
+    state.syncAllLoading = false;
+    renderProjects();
+  }
 }
 
 function setConfirmLoading(loading) {
@@ -644,6 +744,10 @@ window.addEventListener("hashchange", () => {
 $("saveUser")?.addEventListener("click", () => saveUser().catch(alertError));
 $("saveEditUser")?.addEventListener("click", () => saveEditUser().catch(alertError));
 $("closeEditUser")?.addEventListener("click", closeEditUserModal);
+$("editUserProjectAccessAll")?.addEventListener("change", () => {
+  const user = state.users.find((item) => item.id === state.editingUserId);
+  renderEditUserProjectAccessList(user);
+});
 $("editUserBackdrop")?.addEventListener("click", (event) => {
   if (event.target === $("editUserBackdrop")) closeEditUserModal();
 });
@@ -682,6 +786,7 @@ document.querySelector(".admin-confirm-modal")?.addEventListener("click", (event
 });
 $("saveGitlabToken").addEventListener("click", () => saveGitlabToken().catch(alertError));
 $("toggleGitlabToken")?.addEventListener("click", toggleGitlabTokenVisibility);
+$("syncAllProjects")?.addEventListener("click", () => syncAllProjects().catch(alertError));
 $("refreshModels").addEventListener("click", () => loadAll().catch(alertError));
 $("clearTasks").addEventListener("click", () => requestClearTasks());
 $("adminScreen")?.addEventListener("change", (event) => {
@@ -696,6 +801,8 @@ $("modelList").addEventListener("click", (event) => {
 $("projectList").addEventListener("click", (event) => {
   const editId = event.target?.dataset?.editProject;
   const deleteId = event.target?.dataset?.deleteProject;
+  const syncId = event.target?.dataset?.syncProject;
+  if (syncId) syncProject(Number(syncId)).catch(alertError);
   if (editId) openEditProjectModal(Number(editId));
   if (deleteId) requestDeleteProject(Number(deleteId));
 });

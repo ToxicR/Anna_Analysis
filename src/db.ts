@@ -20,10 +20,17 @@ export function boolToInt(value: unknown, fallback = true): number {
   return value ? 1 : 0;
 }
 
+export function flagToBoolean(value: unknown): boolean {
+  return value === true || value === 1 || value === "1";
+}
+
 export function normalizeRow<T extends object>(row: T): T {
   const clone = { ...(row as Record<string, unknown>) };
   for (const key of ["enabled", "is_default"]) {
     if (key in clone) clone[key] = Boolean(clone[key]);
+  }
+  if ("must_change_password" in clone) {
+    clone.must_change_password = flagToBoolean(clone.must_change_password);
   }
   return clone as T;
 }
@@ -145,13 +152,49 @@ export function initDb(): void {
       password_hash TEXT NOT NULL,
       display_name VARCHAR(120) DEFAULT '',
       enabled BOOLEAN DEFAULT 1,
+      project_access_all BOOLEAN DEFAULT 1,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
 
     CREATE INDEX IF NOT EXISTS ix_app_users_account ON app_users(account);
+
+    CREATE TABLE IF NOT EXISTS app_user_projects (
+      user_id INTEGER NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      PRIMARY KEY(user_id, project_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_app_user_projects_project_id ON app_user_projects(project_id);
   `);
-  migrateAnalysisTaskColumns();
   migrateChatSessionUserColumn();
+  migrateAnalysisTaskColumns();
+  migrateAppUserPasswordFlag();
+  migrateAppUserProjectAccess();
+}
+
+function migrateAppUserPasswordFlag(): void {
+  const columns = db.prepare("PRAGMA table_info(app_users)").all() as Array<{ name: string }>;
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has("must_change_password")) {
+    db.exec("ALTER TABLE app_users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0");
+  }
+}
+
+function migrateAppUserProjectAccess(): void {
+  const columns = db.prepare("PRAGMA table_info(app_users)").all() as Array<{ name: string }>;
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has("project_access_all")) {
+    db.exec("ALTER TABLE app_users ADD COLUMN project_access_all INTEGER NOT NULL DEFAULT 1");
+  }
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS app_user_projects (
+      user_id INTEGER NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      PRIMARY KEY(user_id, project_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_app_user_projects_project_id ON app_user_projects(project_id);
+  `);
 }
 
 function migrateChatSessionUserColumn(): void {

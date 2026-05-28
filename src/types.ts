@@ -128,6 +128,8 @@ export interface AppUser {
   password_hash: string;
   display_name: string;
   enabled: boolean | number;
+  must_change_password?: boolean | number;
+  project_access_all?: boolean | number;
   created_at: string;
 }
 
@@ -136,5 +138,8 @@ export interface AppUserPublic {
   account: string;
   display_name: string;
   enabled: boolean;
+  must_change_password: boolean;
+  project_access_all: boolean;
+  allowed_project_ids: number[];
   created_at: string;
 }
