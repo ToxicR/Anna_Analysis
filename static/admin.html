@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>管理后台 · Anna Analysis</title>
   <link rel="icon" type="image/png" href="/static/assets/anna-logo.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260520-checkbox-row">
+  <link rel="stylesheet" href="/static/styles.css?v=20260601-feishu-chat-ui">
 </head>
 <body class="admin-page">
   <section id="loginScreen" class="admin-login">
@@ -39,8 +39,9 @@
       <nav class="admin-nav" aria-label="管理分类">
         <button type="button" class="admin-nav-item active" data-admin-page="projects">项目与仓库</button>
         <button type="button" class="admin-nav-item" data-admin-page="integrations">集成配置</button>
+        <button type="button" class="admin-nav-item" data-admin-page="feishu">飞书集成</button>
         <button type="button" class="admin-nav-item" data-admin-page="models">AI 模型</button>
-        <button type="button" class="admin-nav-item" data-admin-page="accounts">账号管理</button>
+        <button type="button" class="admin-nav-item" data-admin-page="accounts">用户管理</button>
         <button type="button" class="admin-nav-item" data-admin-page="login-records">登录记录</button>
         <button type="button" class="admin-nav-item" data-admin-page="history">分析历史</button>
       </nav>
@@ -136,6 +137,106 @@
           </section>
         </section>
 
+        <section id="adminPageFeishu" class="admin-page-panel" data-page="feishu" hidden>
+          <section class="panel integration-card">
+            <div class="panel-heading">
+              <h2>飞书应用配置</h2>
+            </div>
+            <p class="panel-intro">飞书入口与 Web 入口分离：会话、消息走独立表，共用底层分析与项目权限。事件订阅 URL：<code id="feishuWebhookUrl">/api/feishu/webhook</code></p>
+            <div class="admin-form-grid admin-form-grid-compact">
+              <div class="admin-form-block">
+                <label for="feishuAppId">App ID</label>
+                <input id="feishuAppId" autocomplete="off" placeholder="cli_xxx">
+                <label for="feishuAppSecret">App Secret</label>
+                <input id="feishuAppSecret" type="password" autocomplete="off" placeholder="留空则不修改">
+                <label for="feishuVerificationToken">Verification Token</label>
+                <input id="feishuVerificationToken" type="password" autocomplete="off" placeholder="事件订阅校验 Token">
+                <label for="feishuEncryptKey">Encrypt Key（可选）</label>
+                <input id="feishuEncryptKey" type="password" autocomplete="off" placeholder="启用加密时填写">
+              </div>
+            </div>
+            <button id="saveFeishuSettings" type="button" class="primary">保存飞书配置</button>
+            <p id="feishuSettingsStatus" class="integration-hint"></p>
+          </section>
+
+          <section class="panel admin-panel-form">
+            <div class="panel-heading">
+              <h2>创建飞书用户</h2>
+            </div>
+            <p class="panel-intro">飞书与 Web 共用同一套用户与项目权限。在此选择联系人即可创建用户（默认仅飞书登录，无项目权限）。</p>
+            <div class="feishu-bind-layout">
+              <div class="feishu-bind-picker">
+                <div class="feishu-bind-toolbar">
+                  <input id="feishuDirectorySearch" type="search" autocomplete="off" placeholder="筛选姓名，如：韩日日">
+                  <button type="button" id="reloadFeishuDirectory" class="secondary">重新加载</button>
+                  <span id="feishuDirectoryCount" class="feishu-bind-count">—</span>
+                </div>
+                <p id="feishuDirectoryHint" class="feishu-bind-hint">正在加载通讯录…</p>
+                <div id="feishuDirectoryResults" class="feishu-directory-results feishu-directory-scroll"></div>
+                <details class="feishu-recent-details">
+                  <summary>最近联系（给机器人发过消息）</summary>
+                  <div id="feishuRecentContacts" class="feishu-directory-results feishu-recent-list"></div>
+                </details>
+              </div>
+              <div class="feishu-bind-form">
+                <h3 class="feishu-bind-form-title">创建飞书用户</h3>
+                <div id="feishuBindPreview" class="feishu-bind-preview is-empty">请从左侧选择飞书联系人</div>
+                <label for="feishuUserOpenId">open_id</label>
+                <input id="feishuUserOpenId" class="feishu-id-input" autocomplete="off" readonly placeholder="选择联系人后自动填充">
+                <input id="feishuUserUnionId" type="hidden">
+                <label for="feishuUserDisplayName">显示名称</label>
+                <input id="feishuUserDisplayName" autocomplete="off" placeholder="自动填入飞书姓名，可修改">
+                <button id="saveFeishuUser" type="button" class="primary feishu-bind-save">创建用户并绑定飞书</button>
+              </div>
+            </div>
+            <div id="feishuUserList" class="list admin-list feishu-bound-list"></div>
+          </section>
+
+          <section class="panel admin-panel-form">
+            <div class="panel-heading">
+              <h2>飞书群绑定</h2>
+            </div>
+            <p class="panel-intro">群聊可绑定一个或多个项目。群内可用项目 = 群绑定项目 ∩ 用户已分配项目。</p>
+            <div class="feishu-chat-bind-layout">
+              <div class="feishu-chat-bind-form">
+                <h3 class="feishu-bind-form-title">群信息</h3>
+                <label for="feishuChatId">chat_id</label>
+                <div class="feishu-chat-id-row">
+                  <input id="feishuChatId" class="feishu-id-input" autocomplete="off" placeholder="oc_xxx">
+                  <button type="button" id="fetchFeishuChatInfo" class="secondary">获取群信息</button>
+                </div>
+                <p id="feishuChatLookupHint" class="field-hint">输入 chat_id 后点「获取群信息」，或失焦时自动拉取飞书群名称。需机器人已在该群内，并开通「获取群组信息」(im:chat:readonly)。</p>
+                <label for="feishuChatName">群名称</label>
+                <input id="feishuChatName" autocomplete="off" placeholder="自动从飞书获取，也可手动填写">
+                <label for="feishuChatType">类型</label>
+                <select id="feishuChatType">
+                  <option value="group">群聊 group</option>
+                  <option value="p2p">私聊 p2p</option>
+                </select>
+                <label class="checkbox-row feishu-chat-shared-row" for="feishuChatAllowShared">
+                  <input id="feishuChatAllowShared" type="checkbox" checked>
+                  <span>允许 /共享 协作会话</span>
+                </label>
+                <button id="saveFeishuChat" type="button" class="primary feishu-bind-save">保存群绑定</button>
+              </div>
+              <div class="feishu-chat-bind-projects">
+                <div class="feishu-chat-bind-projects-head">
+                  <h3 class="feishu-bind-form-title">绑定项目</h3>
+                  <span id="feishuChatProjectCount" class="feishu-bind-count">0 项</span>
+                </div>
+                <p class="feishu-bind-hint">至少选择一个项目，否则该群无法进行分析。</p>
+                <div class="feishu-chat-project-toolbar">
+                  <input id="feishuChatProjectFilter" type="search" autocomplete="off" placeholder="筛选项目名称">
+                  <button type="button" id="selectAllFeishuChatProjects" class="secondary">全选</button>
+                  <button type="button" id="clearFeishuChatProjects" class="secondary">清空</button>
+                </div>
+                <div id="feishuChatProjectList" class="feishu-chat-project-grid"></div>
+              </div>
+            </div>
+            <div id="feishuChatList" class="list admin-list feishu-bound-list"></div>
+          </section>
+        </section>
+
         <section id="adminPageModels" class="admin-page-panel" data-page="models" hidden>
           <section class="panel">
             <div class="panel-heading">
@@ -148,31 +249,11 @@
         </section>
 
         <section id="adminPageAccounts" class="admin-page-panel" data-page="accounts" hidden>
-          <section class="panel admin-panel-form">
-            <div class="panel-heading">
-              <h2>新建前端登录账号</h2>
-            </div>
-            <p class="panel-intro">在此创建的账号用于前端分析页登录，与管理后台管理员账号相互独立。</p>
-            <div class="admin-form-grid admin-form-grid-compact">
-              <div class="admin-form-block">
-                <label for="newUserAccount">登录账号</label>
-                <input id="newUserAccount" placeholder="例如：13800138000" autocomplete="off">
-                <p class="field-hint">初始密码固定为 <strong>123456</strong>，用户首次登录后须自行修改。</p>
-              </div>
-              <div class="admin-form-block">
-                <label for="newUserDisplayName">显示名称（可选）</label>
-                <input id="newUserDisplayName" placeholder="例如：张三">
-                <label class="checkbox-row" for="newUserEnabled">
-                  <input id="newUserEnabled" type="checkbox" checked>
-                  <span>启用账号</span>
-                </label>
-              </div>
-            </div>
-            <button id="saveUser" type="button" class="primary">创建账号</button>
-          </section>
-
           <section class="panel">
-            <h2>已创建账号</h2>
+            <div class="panel-heading">
+              <h2>用户列表</h2>
+            </div>
+            <p class="panel-intro">用户默认在「飞书集成」中创建（仅飞书登录、无项目权限）。可在此编辑权限，或为仅飞书用户一键开通 Web 登录。</p>
             <div id="userList" class="list admin-list"></div>
           </section>
         </section>
@@ -194,11 +275,17 @@
               <h2>分析历史</h2>
               <button id="clearTasks" type="button" class="danger">清空</button>
             </div>
-            <p class="panel-intro">按前端登录用户查看和管理已执行的分析任务记录。</p>
+            <p class="panel-intro">按前端登录用户或来源查看和管理已执行的分析任务记录。</p>
             <div class="admin-history-toolbar">
               <label for="taskUserFilter">用户</label>
               <select id="taskUserFilter">
                 <option value="">全部用户</option>
+              </select>
+              <label for="taskSourceFilter">来源</label>
+              <select id="taskSourceFilter">
+                <option value="">全部来源</option>
+                <option value="web">Web</option>
+                <option value="feishu">飞书</option>
               </select>
             </div>
             <div id="taskList" class="list history admin-list"></div>
@@ -218,15 +305,16 @@
         <button id="closeEditUser" type="button">关闭</button>
       </div>
       <div class="analysis-settings-body admin-modal-body">
-        <label>登录账号</label>
+        <label id="editUserAccountLabel">Web 登录账号</label>
         <input id="editUserAccount" readonly>
+        <p id="editUserWebHint" class="field-hint" hidden>该用户尚未开通 Web 登录，可在用户列表中一键开通。</p>
 
         <label>显示名称</label>
         <input id="editUserDisplayName" placeholder="显示在前端页右上角">
 
         <label class="checkbox-row" for="editUserEnabled">
           <input id="editUserEnabled" type="checkbox">
-          <span>启用账号</span>
+          <span>启用用户</span>
         </label>
 
         <label class="checkbox-row" for="editUserProjectAccessAll">
@@ -234,12 +322,33 @@
           <span>允许访问全部项目</span>
         </label>
         <div id="editUserProjectAccessList" class="admin-check-list"></div>
-        <p class="field-hint">取消“全部项目”后，只能访问勾选的项目。</p>
+        <p class="field-hint">取消“全部项目”后，只能访问勾选的项目。新用户默认无任何项目权限。</p>
 
-        <label>新密码（留空则不修改）</label>
-        <input id="editUserPassword" type="password" placeholder="重置后用户下次登录须修改密码" autocomplete="new-password">
+        <div id="editUserPasswordBlock">
+          <label>新密码（留空则不修改）</label>
+          <input id="editUserPassword" type="password" placeholder="重置后用户下次登录须修改密码" autocomplete="new-password">
+        </div>
 
         <button id="saveEditUser" type="button" class="primary full">保存修改</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="enableWebLoginBackdrop" class="session-backdrop" hidden>
+    <div class="session-modal analysis-settings-modal" role="dialog" aria-labelledby="enableWebLoginTitle">
+      <div class="session-modal-header">
+        <div>
+          <h3 id="enableWebLoginTitle">开通 Web 登录</h3>
+          <p id="enableWebLoginSubtitle">为该用户创建前端分析页登录账号</p>
+        </div>
+        <button id="closeEnableWebLogin" type="button">关闭</button>
+      </div>
+      <div class="analysis-settings-body admin-modal-body">
+        <label for="enableWebLoginAccount">登录账号</label>
+        <input id="enableWebLoginAccount" autocomplete="off" placeholder="例如：工号或手机号">
+        <p id="enableWebLoginSubtitle" class="field-hint">创建前端分析页登录账号，优先使用飞书手机号。</p>
+        <p class="field-hint">初始密码固定为 <strong>123456</strong>。若飞书未返回手机号，请在飞书开放平台开通「获取用户手机号」(contact:user.phone:readonly) 并发布应用。</p>
+        <button id="saveEnableWebLogin" type="button" class="primary full">确认开通</button>
       </div>
     </div>
   </div>
@@ -298,6 +407,6 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260528-login-records-page"></script>
+  <script src="/static/admin.js?v=20260602-feishu-stream"></script>
 </body>
 </html>

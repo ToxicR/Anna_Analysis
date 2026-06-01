@@ -185,6 +185,17 @@ export function initDb(): void {
   migrateAppUserPasswordFlag();
   migrateAppUserProjectAccess();
   migrateAppUserLoginRecords();
+  migrateFeishuIntegration();
+  migrateAppUserWebLogin();
+}
+
+function migrateAppUserWebLogin(): void {
+  const columns = db.prepare("PRAGMA table_info(app_users)").all() as Array<{ name: string }>;
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has("web_login_enabled")) {
+    db.exec("ALTER TABLE app_users ADD COLUMN web_login_enabled INTEGER NOT NULL DEFAULT 0");
+    db.exec("UPDATE app_users SET web_login_enabled = 1");
+  }
 }
 
 function migrateAppUserPasswordFlag(): void {
@@ -260,6 +271,104 @@ function migrateAnalysisTaskColumns(): void {
     db.exec("CREATE INDEX IF NOT EXISTS ix_analysis_tasks_chat_session_id ON analysis_tasks(chat_session_id)");
   }
   backfillAnalysisTaskUsers();
+}
+
+function migrateFeishuIntegration(): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS feishu_users (
+      open_id TEXT PRIMARY KEY,
+      app_user_id INTEGER NOT NULL REFERENCES app_users(id) ON DELETE CASCADE,
+      union_id TEXT DEFAULT '',
+      display_name TEXT DEFAULT '',
+      enabled BOOLEAN DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_feishu_users_app_user_id ON feishu_users(app_user_id);
+
+    CREATE TABLE IF NOT EXISTS feishu_chats (
+      chat_id TEXT PRIMARY KEY,
+      chat_type TEXT NOT NULL DEFAULT 'group',
+      name TEXT DEFAULT '',
+      enabled BOOLEAN DEFAULT 1,
+      allow_shared_mode BOOLEAN DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS feishu_chat_projects (
+      chat_id TEXT NOT NULL REFERENCES feishu_chats(chat_id) ON DELETE CASCADE,
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      PRIMARY KEY (chat_id, project_id)
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_feishu_chat_projects_project_id ON feishu_chat_projects(project_id);
+
+    CREATE TABLE IF NOT EXISTS feishu_chat_sessions (
+      id TEXT PRIMARY KEY,
+      app_user_id INTEGER REFERENCES app_users(id) ON DELETE SET NULL,
+      project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+      title TEXT DEFAULT '飞书会话',
+      model_id INTEGER REFERENCES ai_models(id),
+      output_mode VARCHAR(40) DEFAULT 'non_developer',
+      analysis_scope TEXT DEFAULT '',
+      repo_ids TEXT DEFAULT '',
+      mode TEXT NOT NULL DEFAULT 'personal',
+      chat_id TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_feishu_chat_sessions_chat_id ON feishu_chat_sessions(chat_id);
+    CREATE INDEX IF NOT EXISTS ix_feishu_chat_sessions_app_user_id ON feishu_chat_sessions(app_user_id);
+
+    CREATE TABLE IF NOT EXISTS feishu_chat_messages (
+      id INTEGER PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES feishu_chat_sessions(id) ON DELETE CASCADE,
+      open_id TEXT DEFAULT '',
+      role VARCHAR(20) NOT NULL,
+      meta TEXT DEFAULT '',
+      body TEXT NOT NULL,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_feishu_chat_messages_session_id ON feishu_chat_messages(session_id);
+
+    CREATE TABLE IF NOT EXISTS feishu_session_links (
+      id INTEGER PRIMARY KEY,
+      chat_id TEXT NOT NULL,
+      open_id TEXT NOT NULL DEFAULT '',
+      mode TEXT NOT NULL DEFAULT 'personal',
+      session_id TEXT NOT NULL REFERENCES feishu_chat_sessions(id) ON DELETE CASCADE,
+      current_project_id INTEGER REFERENCES projects(id) ON DELETE SET NULL,
+      shared_started_by_open_id TEXT DEFAULT '',
+      last_open_id TEXT DEFAULT '',
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(chat_id, open_id, mode)
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_feishu_session_links_session_id ON feishu_session_links(session_id);
+
+    CREATE TABLE IF NOT EXISTS feishu_contacts (
+      open_id TEXT PRIMARY KEY,
+      union_id TEXT DEFAULT '',
+      user_id TEXT DEFAULT '',
+      name TEXT DEFAULT '',
+      source TEXT DEFAULT '',
+      last_seen_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_feishu_contacts_last_seen_at ON feishu_contacts(last_seen_at DESC);
+  `);
+
+  const taskColumns = db.prepare("PRAGMA table_info(analysis_tasks)").all() as Array<{ name: string }>;
+  const taskNames = new Set(taskColumns.map((column) => column.name));
+  if (!taskNames.has("source")) db.exec("ALTER TABLE analysis_tasks ADD COLUMN source TEXT DEFAULT 'web'");
+  if (!taskNames.has("feishu_chat_id")) db.exec("ALTER TABLE analysis_tasks ADD COLUMN feishu_chat_id TEXT DEFAULT ''");
+  if (!taskNames.has("feishu_open_id")) db.exec("ALTER TABLE analysis_tasks ADD COLUMN feishu_open_id TEXT DEFAULT ''");
+  if (!taskNames.has("feishu_session_id")) db.exec("ALTER TABLE analysis_tasks ADD COLUMN feishu_session_id TEXT DEFAULT ''");
 }
 
 function backfillAnalysisTaskUsers(): void {

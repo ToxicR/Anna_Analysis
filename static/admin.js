@@ -5,10 +5,23 @@ const state = {
   tasks: [],
   users: [],
   loginRecords: [],
+  feishuSettings: {},
+  feishuUsers: [],
+  feishuChats: [],
+  feishuDirectoryUsers: [],
+  feishuDirectoryAllUsers: [],
+  feishuDirectoryPageToken: "",
+  feishuDirectoryHasMore: false,
+  feishuDirectoryLoading: false,
+  feishuDirectorySelection: null,
+  feishuRecentContacts: [],
+  feishuDirectoryMeta: null,
   taskUserFilter: "",
+  taskSourceFilter: "",
   settings: {},
   editingProjectId: null,
   editingUserId: null,
+  enablingWebLoginUserId: null,
   activePage: "projects",
   pendingConfirmAction: null,
   confirmDefaultMessage: "",
@@ -26,13 +39,17 @@ const ADMIN_PAGES = {
     title: "集成配置",
     desc: "配置 GitLab 等外部服务凭据",
   },
+  feishu: {
+    title: "飞书集成",
+    desc: "配置飞书机器人、创建用户与群项目绑定",
+  },
   models: {
     title: "AI 模型",
     desc: "管理 Cursor 分析模型与默认选项",
   },
   accounts: {
-    title: "账号管理",
-    desc: "创建和管理前端分析页登录账号",
+    title: "用户管理",
+    desc: "管理用户权限与 Web 登录方式",
   },
   "login-records": {
     title: "登录记录",
@@ -127,6 +144,9 @@ function switchAdminPage(page) {
   if (page === "login-records") {
     refreshLoginRecordsData().catch(alertError);
   }
+  if (page === "feishu") {
+    refreshFeishuData().catch(alertError);
+  }
 }
 
 async function checkAuth() {
@@ -206,12 +226,524 @@ async function loadAll() {
   if (state.activePage === "login-records") {
     await refreshLoginRecordsData();
   }
+  if (state.activePage === "feishu") {
+    await refreshFeishuData();
+  }
 }
 
 async function refreshUsersData() {
   state.users = await api("/api/admin/users");
   renderUsers();
   renderTaskUserFilter();
+}
+
+async function refreshFeishuData() {
+  const [settings, users, chats, recent] = await Promise.all([
+    api("/api/admin/feishu/settings"),
+    api("/api/admin/feishu/users"),
+    api("/api/admin/feishu/chats"),
+    api("/api/admin/feishu/directory/recent").catch(() => ({ users: [], meta: null })),
+  ]);
+  state.feishuSettings = settings;
+  state.feishuUsers = users;
+  state.feishuChats = chats;
+  state.feishuRecentContacts = Array.isArray(recent.users) ? recent.users : [];
+  state.feishuDirectoryMeta = recent.meta || null;
+  renderFeishu();
+  await loadFeishuDirectoryAll(false);
+}
+
+async function saveFeishuSettings() {
+  const payload = { app_id: $("feishuAppId").value.trim() };
+  const appSecret = $("feishuAppSecret").value.trim();
+  const verificationToken = $("feishuVerificationToken").value.trim();
+  const encryptKey = $("feishuEncryptKey").value.trim();
+  if (appSecret) payload.app_secret = appSecret;
+  if (verificationToken) payload.verification_token = verificationToken;
+  if (encryptKey) payload.encrypt_key = encryptKey;
+  state.feishuSettings = await api("/api/admin/feishu/settings", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+  $("feishuAppSecret").value = "";
+  $("feishuVerificationToken").value = "";
+  $("feishuEncryptKey").value = "";
+  renderFeishuSettings();
+}
+
+function feishuSecretPlaceholder(masked, emptyHint) {
+  return masked ? `已配置 (${masked})，留空则不修改` : emptyHint;
+}
+
+async function refreshFeishuUserBindings() {
+  const [users, recent] = await Promise.all([
+    api("/api/admin/feishu/users"),
+    api("/api/admin/feishu/directory/recent").catch(() => ({ users: [], meta: null })),
+  ]);
+  state.feishuUsers = users;
+  state.feishuRecentContacts = Array.isArray(recent.users) ? recent.users : [];
+  renderFeishuUsers();
+  renderFeishuRecentContacts();
+}
+
+async function saveFeishuUserBinding() {
+  const openId = $("feishuUserOpenId").value.trim();
+  if (!openId) throw new Error("请从飞书通讯录选择联系人");
+  const displayName = $("feishuUserDisplayName").value.trim()
+    || feishuRealName(state.feishuDirectorySelection)
+    || "";
+  await api("/api/admin/feishu/users", {
+    method: "POST",
+    body: JSON.stringify({
+      open_id: openId,
+      union_id: $("feishuUserUnionId").value.trim(),
+      display_name: displayName,
+      enabled: true,
+    }),
+  });
+  clearFeishuUserForm();
+  await refreshFeishuUserBindings();
+  await refreshUsersData();
+}
+
+function clearFeishuUserForm() {
+  state.feishuDirectorySelection = null;
+  if ($("feishuUserOpenId")) $("feishuUserOpenId").value = "";
+  if ($("feishuUserUnionId")) $("feishuUserUnionId").value = "";
+  if ($("feishuUserDisplayName")) $("feishuUserDisplayName").value = "";
+  renderFeishuDirectoryResults();
+  renderFeishuRecentContacts();
+  renderFeishuBindPreview();
+}
+
+async function loadFeishuDirectoryAll(forceRefresh = false) {
+  state.feishuDirectoryLoading = true;
+  state.feishuDirectoryAllUsers = [];
+  state.feishuDirectoryUsers = [];
+  renderFeishuDirectoryResults();
+  try {
+    let pageToken = "";
+    const all = [];
+    let meta = state.feishuDirectoryMeta;
+    do {
+      const params = new URLSearchParams({ page_size: "100" });
+      if (pageToken) params.set("page_token", pageToken);
+      if (forceRefresh && !pageToken) params.set("refresh", "1");
+      const data = await api(`/api/admin/feishu/directory/users?${params}`);
+      all.push(...(Array.isArray(data.users) ? data.users : []));
+      pageToken = data.has_more ? (data.page_token || "") : "";
+      meta = data.meta || meta;
+    } while (pageToken);
+    state.feishuDirectoryAllUsers = all;
+    state.feishuDirectoryMeta = meta;
+    applyFeishuDirectoryFilter();
+  } finally {
+    state.feishuDirectoryLoading = false;
+    renderFeishuDirectoryResults();
+  }
+}
+
+function applyFeishuDirectoryFilter() {
+  const filter = ($("feishuDirectorySearch")?.value.trim() ?? "").toLowerCase();
+  if (!filter) {
+    state.feishuDirectoryUsers = [...state.feishuDirectoryAllUsers];
+  } else {
+    state.feishuDirectoryUsers = state.feishuDirectoryAllUsers.filter((user) =>
+      user.name.toLowerCase().includes(filter)
+      || user.open_id.toLowerCase().includes(filter)
+      || String(user.user_id || "").toLowerCase().includes(filter),
+    );
+  }
+  renderFeishuDirectoryResults();
+}
+
+function feishuRealName(user) {
+  const name = (user?.name || "").trim();
+  if (!name || name === user?.user_id || name === user?.open_id) return "";
+  return name;
+}
+
+function feishuDisplayName(user) {
+  return feishuRealName(user) || user?.name || user?.user_id || user?.open_id || "";
+}
+
+function feishuNameInitial(name) {
+  const trimmed = (name || "").trim();
+  if (!trimmed) return "?";
+  return trimmed.slice(0, 1);
+}
+
+function updateFeishuDirectoryCount(shown, total, filter) {
+  const count = $("feishuDirectoryCount");
+  if (!count) return;
+  if (state.feishuDirectoryLoading) {
+    count.textContent = "…";
+    return;
+  }
+  if (!total) {
+    count.textContent = "0 人";
+    return;
+  }
+  count.textContent = filter ? `${shown}/${total} 人` : `${total} 人`;
+}
+
+function renderFeishuBindPreview() {
+  const preview = $("feishuBindPreview");
+  if (!preview) return;
+  const user = state.feishuDirectorySelection;
+  if (!user) {
+    preview.className = "feishu-bind-preview is-empty";
+    preview.textContent = "请从左侧选择飞书联系人";
+    return;
+  }
+  const name = feishuDisplayName(user);
+  preview.className = "feishu-bind-preview";
+  preview.innerHTML = `
+    <span class="feishu-bind-preview-avatar">${escapeHtml(feishuNameInitial(name))}</span>
+    <span class="feishu-bind-preview-body">
+      <span class="feishu-bind-preview-name">${escapeHtml(name)}</span>
+      ${user.user_id ? `<span class="feishu-bind-preview-meta">user_id · ${escapeHtml(user.user_id)}</span>` : ""}
+    </span>
+  `;
+}
+
+function renderFeishuDirectoryItem(user, selectedId, attrName, attrValue) {
+  const selected = selectedId === user.open_id ? " is-selected" : "";
+  const name = feishuDisplayName(user);
+  const subline = user.user_id ? user.user_id : "";
+  return `
+    <button type="button" class="feishu-directory-item${selected}" ${attrName}="${escapeHtml(attrValue)}">
+      <span class="feishu-directory-avatar">${escapeHtml(feishuNameInitial(name))}</span>
+      <span class="feishu-directory-body">
+        <span class="feishu-directory-title">${escapeHtml(name)}</span>
+        ${subline ? `<span class="feishu-directory-sub">${escapeHtml(subline)}</span>` : ""}
+      </span>
+    </button>
+  `;
+}
+
+function findFeishuDirectoryUser(openId) {
+  return state.feishuDirectoryAllUsers.find((item) => item.open_id === openId)
+    || state.feishuDirectoryUsers.find((item) => item.open_id === openId)
+    || state.feishuRecentContacts.find((item) => item.open_id === openId);
+}
+
+function selectFeishuDirectoryUser(openId) {
+  const user = findFeishuDirectoryUser(openId);
+  if (!user) return;
+  state.feishuDirectorySelection = user;
+  $("feishuUserOpenId").value = user.open_id;
+  $("feishuUserUnionId").value = user.union_id || "";
+  $("feishuUserDisplayName").value = feishuRealName(user) || user.name || "";
+  renderFeishuDirectoryResults();
+  renderFeishuRecentContacts();
+  renderFeishuBindPreview();
+}
+
+function renderFeishuRecentContacts() {
+  const list = $("feishuRecentContacts");
+  if (!list) return;
+  const contacts = state.feishuRecentContacts;
+  if (!contacts.length) {
+    list.innerHTML = `<p class="integration-hint">暂无记录。请让对方在飞书中给 Anna 机器人发任意消息（如 /帮助）。</p>`;
+    return;
+  }
+  const selectedId = state.feishuDirectorySelection?.open_id || "";
+  list.innerHTML = contacts.map((user) =>
+    renderFeishuDirectoryItem(user, selectedId, "data-feishu-recent-open-id", user.open_id),
+  ).join("");
+}
+
+function renderFeishuDirectoryResults() {
+  const list = $("feishuDirectoryResults");
+  const hint = $("feishuDirectoryHint");
+  if (!list) return;
+
+  const filter = $("feishuDirectorySearch")?.value.trim() ?? "";
+  const total = state.feishuDirectoryAllUsers.length;
+  const shown = state.feishuDirectoryUsers.length;
+
+  if (state.feishuDirectoryLoading) {
+    list.innerHTML = `<div class="feishu-directory-empty">正在从飞书加载通讯录…</div>`;
+    if (hint) hint.textContent = "首次加载可能需要几秒钟";
+    updateFeishuDirectoryCount(0, 0, filter);
+    return;
+  }
+
+  if (!total) {
+    list.innerHTML = `<div class="feishu-directory-empty">未加载到联系人，请检查飞书配置与通讯录权限范围</div>`;
+    if (hint) hint.textContent = state.feishuDirectoryMeta?.hint || "点击「重新加载」重试";
+    updateFeishuDirectoryCount(0, 0, filter);
+    return;
+  }
+
+  if (!shown) {
+    list.innerHTML = `<div class="feishu-directory-empty">筛选无结果，请换个关键词或清空筛选框</div>`;
+    if (hint) hint.textContent = `共 ${total} 位联系人，输入中文姓名可快速定位`;
+    updateFeishuDirectoryCount(0, total, filter);
+    return;
+  }
+
+  const selectedId = state.feishuDirectorySelection?.open_id || "";
+  list.innerHTML = state.feishuDirectoryUsers.map((user) =>
+    renderFeishuDirectoryItem(user, selectedId, "data-feishu-directory-open-id", user.open_id),
+  ).join("");
+
+  updateFeishuDirectoryCount(shown, total, filter);
+  if (hint) {
+    hint.textContent = selectedId
+      ? `已选择 ${feishuDisplayName(state.feishuDirectorySelection)}，请选择系统用户后保存`
+      : "点击左侧联系人，右侧将显示绑定信息";
+  }
+}
+
+async function saveFeishuChatBinding() {
+  const chatId = $("feishuChatId").value.trim();
+  if (!chatId) throw new Error("请填写 chat_id");
+  let name = $("feishuChatName").value.trim();
+  if (!name) {
+    try {
+      const info = await api(`/api/admin/feishu/chats/${encodeURIComponent(chatId)}/info`);
+      name = info.name || "";
+      if (info.chat_type) $("feishuChatType").value = info.chat_type;
+      if (name) $("feishuChatName").value = name;
+    } catch {
+      // 保存时拉取失败仍允许手动保存。
+    }
+  }
+  await api("/api/admin/feishu/chats", {
+    method: "POST",
+    body: JSON.stringify({
+      chat_id: chatId,
+      chat_type: $("feishuChatType").value,
+      name,
+      allow_shared_mode: $("feishuChatAllowShared").checked,
+      enabled: true,
+      project_ids: selectedFeishuChatProjectIds(),
+    }),
+  });
+  $("feishuChatId").value = "";
+  $("feishuChatName").value = "";
+  setFeishuChatLookupHint("");
+  if ($("feishuChatProjectFilter")) $("feishuChatProjectFilter").value = "";
+  document.querySelectorAll("#feishuChatProjectList input[type=checkbox]").forEach((input) => {
+    input.checked = false;
+  });
+  applyFeishuChatProjectFilter();
+  await refreshFeishuData();
+}
+
+function setFeishuChatLookupHint(message = "") {
+  const hint = $("feishuChatLookupHint");
+  if (!hint) return;
+  hint.textContent = message || "输入 chat_id 后点「获取群信息」，或失焦时自动拉取飞书群名称。需机器人已在该群内，并开通「获取群组信息」(im:chat:readonly)。";
+}
+
+async function lookupFeishuChatInfo(options = {}) {
+  const chatId = $("feishuChatId")?.value.trim() ?? "";
+  if (!chatId) {
+    if (!options.silent) throw new Error("请先填写 chat_id");
+    return;
+  }
+  const nameInput = $("feishuChatName");
+  const previousName = nameInput?.value.trim() ?? "";
+  setFeishuChatLookupHint("正在从飞书获取群信息…");
+  try {
+    const info = await api(`/api/admin/feishu/chats/${encodeURIComponent(chatId)}/info`);
+    if (info.chat_type) $("feishuChatType").value = info.chat_type;
+    if (info.name && (!previousName || options.overwrite)) {
+      nameInput.value = info.name;
+    }
+    const typeLabel = info.chat_type === "p2p" ? "私聊" : "群聊";
+    const nameLabel = info.name || "（飞书未返回名称，可手动填写）";
+    setFeishuChatLookupHint(`已获取：${typeLabel} · ${nameLabel}`);
+  } catch (error) {
+    setFeishuChatLookupHint(`获取失败：${error.message}`);
+    if (!options.silent) throw error;
+  }
+}
+
+let feishuChatLookupTimer = null;
+function scheduleFeishuChatLookup() {
+  clearTimeout(feishuChatLookupTimer);
+  feishuChatLookupTimer = setTimeout(() => {
+    lookupFeishuChatInfo({ silent: true, overwrite: false }).catch(() => {});
+  }, 500);
+}
+
+async function deleteFeishuUserBinding(openId) {
+  await api(`/api/admin/feishu/users/${encodeURIComponent(openId)}`, { method: "DELETE" });
+  await refreshFeishuData();
+}
+
+async function deleteFeishuChatBinding(chatId) {
+  await api(`/api/admin/feishu/chats/${encodeURIComponent(chatId)}`, { method: "DELETE" });
+  await refreshFeishuData();
+}
+
+function selectedFeishuChatProjectIds() {
+  return [...document.querySelectorAll("#feishuChatProjectList input[type=checkbox][data-feishu-project-id]:checked")]
+    .map((input) => Number(input.dataset.feishuProjectId))
+    .filter((id) => Number.isInteger(id) && id > 0);
+}
+
+function updateFeishuChatProjectCount() {
+  const count = $("feishuChatProjectCount");
+  const list = $("feishuChatProjectList");
+  if (!count || !list) return;
+  const visible = [...list.querySelectorAll("[data-feishu-project-item]:not(.is-hidden)")];
+  const selected = selectedFeishuChatProjectIds();
+  const visibleSelected = visible.filter((item) =>
+    item.querySelector("input[type=checkbox]")?.checked,
+  ).length;
+  if (!state.projects.length) {
+    count.textContent = "0 项";
+    return;
+  }
+  const filter = $("feishuChatProjectFilter")?.value.trim();
+  count.textContent = filter
+    ? `${visibleSelected}/${visible.length} 项`
+    : `${selected.length}/${state.projects.length} 项`;
+}
+
+function applyFeishuChatProjectFilter() {
+  const filter = ($("feishuChatProjectFilter")?.value.trim() ?? "").toLowerCase();
+  const list = $("feishuChatProjectList");
+  if (!list) return;
+  list.querySelectorAll("[data-feishu-project-item]").forEach((item) => {
+    const label = item.dataset.projectLabel?.toLowerCase() ?? "";
+    item.classList.toggle("is-hidden", Boolean(filter) && !label.includes(filter));
+  });
+  updateFeishuChatProjectCount();
+}
+
+function renderFeishuSettings() {
+  const settings = state.feishuSettings || {};
+  $("feishuAppId").value = settings.app_id || "";
+  $("feishuWebhookUrl").textContent = settings.webhook_path || "/api/feishu/webhook";
+  $("feishuAppSecret").placeholder = feishuSecretPlaceholder(
+    settings.app_secret,
+    "留空则不修改",
+  );
+  $("feishuVerificationToken").placeholder = feishuSecretPlaceholder(
+    settings.verification_token,
+    "事件订阅校验 Token，留空则不修改",
+  );
+  $("feishuEncryptKey").placeholder = feishuSecretPlaceholder(
+    settings.encrypt_key,
+    "启用加密时填写，留空则不修改",
+  );
+  const status = $("feishuSettingsStatus");
+  if (status) {
+    const parts = [];
+    if (settings.configured) parts.push("App ID / App Secret 已配置");
+    else parts.push("请填写 App ID 与 App Secret");
+    if (settings.verification_token) parts.push("Verification Token 已配置");
+    else parts.push("Verification Token 未配置");
+    if (settings.encrypt_key) parts.push("Encrypt Key 已配置");
+    status.textContent = `${parts.join("；")}。请在飞书开放平台将事件订阅指向上述 URL，并开通「创建与更新卡片」(cardkit:card:write) 以支持分析结果流式输出。`;
+  }
+}
+
+function renderFeishuUsers() {
+  const list = $("feishuUserList");
+  if (!list) return;
+  if (!state.feishuUsers.length) {
+    list.innerHTML = `<div class="item"><small>暂无飞书用户，请从上方通讯录创建。</small></div>`;
+    return;
+  }
+  list.innerHTML = state.feishuUsers.map((item) => `
+    <div class="item">
+      <strong>${escapeHtml(item.display_name || item.open_id)}</strong>
+      <small>open_id：${escapeHtml(item.open_id)} · 用户 #${item.app_user_id} · ${escapeHtml(item.app_user_display_name || "")} · ${item.enabled ? "启用" : "禁用"}</small>
+      <div class="actions">
+        <button data-delete-feishu-user="${escapeHtml(item.open_id)}" class="danger">删除绑定</button>
+      </div>
+    </div>
+  `).join("");
+}
+
+function userLoginMethodsLabel(user) {
+  const methods = [];
+  if (user.feishu_open_id) methods.push("飞书");
+  if (user.web_login_enabled) methods.push("Web");
+  return methods.length ? methods.join(" + ") : "无登录方式";
+}
+
+function suggestWebLoginAccount(user) {
+  const directoryUser = user.feishu_open_id
+    ? findFeishuDirectoryUser(user.feishu_open_id)
+    : null;
+  const mobile = String(directoryUser?.mobile || "").trim();
+  if (/^1\d{10}$/.test(mobile)) return mobile;
+  const employeeId = String(directoryUser?.user_id || "").trim();
+  if (employeeId && !employeeId.startsWith("ou_")) return employeeId;
+  const name = (user.display_name || "").trim();
+  if (name && !name.startsWith("飞书用户")) return name.replace(/\s+/g, "");
+  return user.feishu_open_id ? `u${user.id}` : "";
+}
+
+function webLoginSuggestionHint(source, mobileAvailable) {
+  if (source === "mobile") return "已使用飞书手机号作为登录账号。";
+  if (!mobileAvailable) {
+    return "未能读取飞书手机号（需开通「获取用户手机号」权限，且用户手机号设为可见）。已改用其他建议账号。";
+  }
+  return "请确认登录账号，初始密码为 123456。";
+}
+
+function renderFeishuChatProjectList() {
+  const list = $("feishuChatProjectList");
+  if (!list) return;
+  if (!state.projects.length) {
+    list.innerHTML = `<div class="feishu-directory-empty">暂无项目，请先在「项目与仓库」中创建。</div>`;
+    updateFeishuChatProjectCount();
+    return;
+  }
+  list.innerHTML = state.projects.map((project) => {
+    const label = `${project.name} (#${project.id})`;
+    return `
+      <label class="checkbox-row" data-feishu-project-item data-project-label="${escapeHtml(label)}">
+        <input type="checkbox" data-feishu-project-id="${project.id}">
+        <span>${escapeHtml(project.name)} <small>(#${project.id})</small></span>
+      </label>
+    `;
+  }).join("");
+  applyFeishuChatProjectFilter();
+}
+
+function renderFeishuChats() {
+  const list = $("feishuChatList");
+  if (!list) return;
+  if (!state.feishuChats.length) {
+    list.innerHTML = `<div class="item"><small>暂无飞书群绑定。</small></div>`;
+    return;
+  }
+  list.innerHTML = state.feishuChats.map((chat) => {
+    const projectTags = (chat.project_ids || []).map((id) => {
+      const name = state.projects.find((project) => project.id === id)?.name || `#${id}`;
+      return `<span class="feishu-chat-bound-tag">${escapeHtml(name)}</span>`;
+    }).join("") || `<span class="feishu-chat-bound-tag">未绑定项目</span>`;
+    return `
+      <div class="item feishu-chat-bound-item">
+        <strong>${escapeHtml(chat.name || chat.chat_id)}</strong>
+        <div class="feishu-chat-bound-meta">${escapeHtml(chat.chat_id)} · ${escapeHtml(chat.chat_type)} · ${chat.allow_shared_mode ? "允许协作" : "禁止协作"}</div>
+        <div class="feishu-chat-bound-tags">${projectTags}</div>
+        <div class="actions">
+          <button data-delete-feishu-chat="${escapeHtml(chat.chat_id)}" class="danger">删除</button>
+        </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderFeishu() {
+  renderFeishuSettings();
+  renderFeishuChatProjectList();
+  renderFeishuUsers();
+  renderFeishuChats();
+  renderFeishuDirectoryResults();
+  renderFeishuRecentContacts();
+  renderFeishuBindPreview();
 }
 
 async function refreshLoginRecordsData() {
@@ -233,8 +765,16 @@ async function refreshProjectsData() {
   renderProjects();
 }
 
+function buildTaskQuery() {
+  const params = new URLSearchParams();
+  if (state.taskUserFilter) params.set("user_id", state.taskUserFilter);
+  if (state.taskSourceFilter) params.set("source", state.taskSourceFilter);
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
 async function refreshTasksData() {
-  const query = state.taskUserFilter ? `?user_id=${encodeURIComponent(state.taskUserFilter)}` : "";
+  const query = buildTaskQuery();
   const list = $("taskList");
   if (list) {
     list.innerHTML = `<div class="item"><small>加载中...</small></div>`;
@@ -252,6 +792,15 @@ function syncTaskUserFilterFromDom() {
 function handleTaskUserFilterChange(event) {
   state.taskUserFilter = event.target.value;
   refreshTasksData().catch(alertError);
+}
+
+function handleTaskSourceFilterChange(event) {
+  state.taskSourceFilter = event.target.value;
+  refreshTasksData().catch(alertError);
+}
+
+function taskSourceLabel(source) {
+  return source === "feishu" ? "飞书" : "Web";
 }
 
 function renderTaskUserFilter() {
@@ -286,14 +835,15 @@ function renderUsers() {
   const list = $("userList");
   if (!list) return;
   if (!state.users.length) {
-    list.innerHTML = `<div class="item"><small>暂无前端登录账号，请先创建。</small></div>`;
+    list.innerHTML = `<div class="item"><small>暂无用户，请先在「飞书集成」中创建。</small></div>`;
     return;
   }
   list.innerHTML = state.users.map((user) => `
     <div class="item">
-      <strong>${escapeHtml(user.display_name || user.account)}</strong>
-      <small>${escapeHtml(user.account)} · ${user.enabled ? "已启用" : "已禁用"}${user.must_change_password ? " · 待改密" : ""} · ${escapeHtml(userProjectAccessLabel(user))} · ${escapeHtml(user.created_at || "")}</small>
+      <strong>${escapeHtml(user.display_name || user.account || `用户 #${user.id}`)}</strong>
+      <small>${escapeHtml(userLoginMethodsLabel(user))}${user.web_login_enabled && user.account ? ` · ${escapeHtml(user.account)}` : ""} · ${user.enabled ? "已启用" : "已禁用"}${user.must_change_password ? " · 待改密" : ""} · ${escapeHtml(userProjectAccessLabel(user))} · ${escapeHtml(user.created_at || "")}</small>
       <div class="actions">
+        ${user.web_login_enabled ? "" : `<button data-enable-web-login="${user.id}">开通 Web 登录</button>`}
         <button data-edit-user="${user.id}">编辑</button>
         <button data-delete-user="${user.id}" class="danger">删除</button>
       </div>
@@ -323,41 +873,61 @@ function setProjectSyncStatus(message = "") {
   }
 }
 
-function clearUserForm() {
-  $("newUserAccount").value = "";
-  $("newUserDisplayName").value = "";
-  $("newUserEnabled").checked = true;
-}
-
-async function saveUser() {
-  const account = $("newUserAccount").value.trim();
-  if (!account) throw new Error("请填写登录账号");
-  await api("/api/admin/users", {
-    method: "POST",
-    body: JSON.stringify({
-      account,
-      display_name: $("newUserDisplayName").value.trim(),
-      enabled: $("newUserEnabled").checked,
-    }),
-  });
-  clearUserForm();
-  await refreshUsersData();
-}
-
 function openEditUserModal(userId) {
   const user = state.users.find((item) => item.id === userId);
   if (!user) return;
   state.editingUserId = userId;
-  $("editUserTitle").textContent = `编辑账号：${user.account}`;
-  $("editUserSubtitle").textContent = "修改显示名称、状态或重置密码";
-  $("editUserAccount").value = user.account;
+  $("editUserTitle").textContent = `编辑用户：${user.display_name || user.account || `#${user.id}`}`;
+  $("editUserSubtitle").textContent = "修改显示名称、状态、项目权限或重置密码";
+  const hasWeb = Boolean(user.web_login_enabled);
+  $("editUserAccountLabel").hidden = !hasWeb;
+  $("editUserAccount").hidden = !hasWeb;
+  $("editUserWebHint").hidden = hasWeb;
+  $("editUserPasswordBlock").hidden = !hasWeb;
+  $("editUserAccount").value = hasWeb ? user.account : "";
   $("editUserDisplayName").value = user.display_name || "";
   $("editUserEnabled").checked = Boolean(user.enabled);
   $("editUserPassword").value = "";
-  $("editUserProjectAccessAll").checked = user.project_access_all !== false;
+  $("editUserProjectAccessAll").checked = Boolean(user.project_access_all);
   renderEditUserProjectAccessList(user);
   $("editUserBackdrop").hidden = false;
   $("editUserDisplayName").focus();
+}
+
+async function openEnableWebLoginModal(userId) {
+  const user = state.users.find((item) => item.id === userId);
+  if (!user || user.web_login_enabled) return;
+  state.enablingWebLoginUserId = userId;
+  $("enableWebLoginTitle").textContent = `开通 Web 登录：${user.display_name || `用户 #${user.id}`}`;
+  $("enableWebLoginSubtitle").textContent = "正在读取飞书账号建议…";
+  $("enableWebLoginAccount").value = suggestWebLoginAccount(user);
+  $("enableWebLoginBackdrop").hidden = false;
+  try {
+    const suggestion = await api(`/api/admin/users/${userId}/web-login-suggestion`);
+    $("enableWebLoginAccount").value = suggestion.account || suggestWebLoginAccount(user);
+    $("enableWebLoginSubtitle").textContent = webLoginSuggestionHint(suggestion.source, suggestion.mobile_available);
+  } catch (error) {
+    $("enableWebLoginSubtitle").textContent = `读取飞书信息失败：${error.message}。已使用本地建议账号，初始密码为 123456。`;
+  }
+  $("enableWebLoginAccount").focus();
+  $("enableWebLoginAccount").select();
+}
+
+function closeEnableWebLoginModal() {
+  $("enableWebLoginBackdrop").hidden = true;
+  state.enablingWebLoginUserId = null;
+}
+
+async function saveEnableWebLogin() {
+  if (!state.enablingWebLoginUserId) return;
+  const account = $("enableWebLoginAccount").value.trim();
+  if (!account) throw new Error("请填写登录账号");
+  await api(`/api/admin/users/${state.enablingWebLoginUserId}/enable-web-login`, {
+    method: "POST",
+    body: JSON.stringify({ account }),
+  });
+  closeEnableWebLoginModal();
+  await refreshUsersData();
 }
 
 function renderEditUserProjectAccessList(user) {
@@ -407,10 +977,10 @@ async function saveEditUser() {
 
 function requestDeleteUser(userId) {
   const user = state.users.find((item) => item.id === userId);
-  const name = user?.display_name || user?.account || "该账号";
+  const name = user?.display_name || user?.account || "该用户";
   openConfirmModal({
-    title: "确认删除账号",
-    message: `确定删除「${name}」吗？删除后该账号将无法登录前端分析页。`,
+    title: "确认删除用户",
+    message: `确定删除「${name}」吗？将同时删除其飞书绑定与 Web 登录。`,
     confirmText: "确认删除",
     action: async () => {
       await api(`/api/admin/users/${userId}`, { method: "DELETE" });
@@ -491,17 +1061,20 @@ function renderTasks() {
   if (!state.tasks.length) {
     const userHint = state.taskUserFilter
       ? "该用户暂无分析历史。"
-      : "暂无分析历史。";
+      : state.taskSourceFilter
+        ? "该来源暂无分析历史。"
+        : "暂无分析历史。";
     list.innerHTML = `<div class="item"><small>${userHint}</small></div>`;
     return;
   }
   list.innerHTML = state.tasks.map((task) => {
     const project = state.projects.find((item) => item.id === task.project_id);
     const userLabel = task.user_display_name || task.user_account || "历史记录（未关联用户）";
+    const sourceLabel = taskSourceLabel(task.source || "web");
     return `
       <div class="item">
         <strong>#${task.id} ${escapeHtml(project?.name || "未知项目")}</strong>
-        <small>用户：${escapeHtml(userLabel)} · ${escapeHtml(task.analysis_type)} · ${escapeHtml(task.question)}</small>
+        <small>来源：${escapeHtml(sourceLabel)} · 用户：${escapeHtml(userLabel)} · ${escapeHtml(task.analysis_type)} · ${escapeHtml(task.question)}</small>
         <div class="actions">
           <button data-delete-task="${task.id}" class="danger">删除</button>
         </div>
@@ -735,14 +1308,21 @@ function requestDeleteTask(taskId) {
 function requestClearTasks() {
   if (!state.tasks.length) return;
   const user = state.users.find((item) => String(item.id) === String(state.taskUserFilter));
-  const scopeLabel = user ? `「${user.display_name || user.account}」的` : "全部";
+  const sourceLabel = state.taskSourceFilter ? taskSourceLabel(state.taskSourceFilter) : "";
+  let scopeLabel = "全部";
+  if (user && sourceLabel) {
+    scopeLabel = `「${user.display_name || user.account}」且来源为「${sourceLabel}」的`;
+  } else if (user) {
+    scopeLabel = `「${user.display_name || user.account}」的`;
+  } else if (sourceLabel) {
+    scopeLabel = `来源为「${sourceLabel}」的`;
+  }
   openConfirmModal({
     title: "确认清空",
     message: `确定清空${scopeLabel}分析历史吗？此操作不可恢复。`,
     confirmText: "确认清空",
     action: async () => {
-      const query = state.taskUserFilter ? `?user_id=${encodeURIComponent(state.taskUserFilter)}` : "";
-      await api(`/api/tasks${query}`, { method: "DELETE" });
+      await api(`/api/tasks${buildTaskQuery()}`, { method: "DELETE" });
       await refreshTasksData();
     },
   });
@@ -787,9 +1367,14 @@ window.addEventListener("hashchange", () => {
   switchAdminPage(readAdminPageFromHash());
 });
 
-$("saveUser")?.addEventListener("click", () => saveUser().catch(alertError));
+
 $("saveEditUser")?.addEventListener("click", () => saveEditUser().catch(alertError));
 $("closeEditUser")?.addEventListener("click", closeEditUserModal);
+$("saveEnableWebLogin")?.addEventListener("click", () => saveEnableWebLogin().catch(alertError));
+$("closeEnableWebLogin")?.addEventListener("click", closeEnableWebLoginModal);
+$("enableWebLoginBackdrop")?.addEventListener("click", (event) => {
+  if (event.target === $("enableWebLoginBackdrop")) closeEnableWebLoginModal();
+});
 $("editUserProjectAccessAll")?.addEventListener("change", () => {
   const user = state.users.find((item) => item.id === state.editingUserId);
   renderEditUserProjectAccessList(user);
@@ -801,8 +1386,10 @@ $("editUserBackdrop")?.addEventListener("click", (event) => {
 $("userList")?.addEventListener("click", (event) => {
   const editId = event.target?.dataset?.editUser;
   const deleteId = event.target?.dataset?.deleteUser;
+  const enableWebId = event.target?.dataset?.enableWebLogin;
   if (editId) openEditUserModal(Number(editId));
   if (deleteId) requestDeleteUser(Number(deleteId));
+  if (enableWebId) openEnableWebLoginModal(Number(enableWebId));
 });
 
 $("saveProject").addEventListener("click", () => saveProject().catch(alertError));
@@ -834,10 +1421,55 @@ $("saveGitlabToken").addEventListener("click", () => saveGitlabToken().catch(ale
 $("toggleGitlabToken")?.addEventListener("click", toggleGitlabTokenVisibility);
 $("syncAllProjects")?.addEventListener("click", () => syncAllProjects().catch(alertError));
 $("refreshLoginRecords")?.addEventListener("click", () => refreshLoginRecordsData().catch(alertError));
+$("saveFeishuSettings")?.addEventListener("click", () => saveFeishuSettings().catch(alertError));
+$("saveFeishuUser")?.addEventListener("click", () => saveFeishuUserBinding().catch(alertError));
+$("reloadFeishuDirectory")?.addEventListener("click", () => loadFeishuDirectoryAll(true).catch(alertError));
+$("feishuDirectorySearch")?.addEventListener("input", () => applyFeishuDirectoryFilter());
+$("feishuDirectoryResults")?.addEventListener("click", (event) => {
+  const target = event.target.closest("[data-feishu-directory-open-id]");
+  if (target?.dataset?.feishuDirectoryOpenId) {
+    selectFeishuDirectoryUser(target.dataset.feishuDirectoryOpenId);
+  }
+});
+$("feishuRecentContacts")?.addEventListener("click", (event) => {
+  const target = event.target.closest("[data-feishu-recent-open-id]");
+  if (target?.dataset?.feishuRecentOpenId) {
+    selectFeishuDirectoryUser(target.dataset.feishuRecentOpenId);
+  }
+});
+$("feishuChatProjectList")?.addEventListener("change", () => updateFeishuChatProjectCount());
+$("feishuChatProjectFilter")?.addEventListener("input", () => applyFeishuChatProjectFilter());
+$("selectAllFeishuChatProjects")?.addEventListener("click", () => {
+  document.querySelectorAll("#feishuChatProjectList [data-feishu-project-item]:not(.is-hidden) input[type=checkbox]").forEach((input) => {
+    input.checked = true;
+  });
+  updateFeishuChatProjectCount();
+});
+$("clearFeishuChatProjects")?.addEventListener("click", () => {
+  document.querySelectorAll("#feishuChatProjectList input[type=checkbox]").forEach((input) => {
+    input.checked = false;
+  });
+  updateFeishuChatProjectCount();
+});
+$("saveFeishuChat")?.addEventListener("click", () => saveFeishuChatBinding().catch(alertError));
+$("fetchFeishuChatInfo")?.addEventListener("click", () => lookupFeishuChatInfo({ overwrite: true }).catch(alertError));
+$("feishuChatId")?.addEventListener("blur", () => scheduleFeishuChatLookup());
+$("feishuChatId")?.addEventListener("input", () => {
+  if (!$("feishuChatId").value.trim()) setFeishuChatLookupHint("");
+});
+$("feishuUserList")?.addEventListener("click", (event) => {
+  const openId = event.target?.dataset?.deleteFeishuUser;
+  if (openId) deleteFeishuUserBinding(openId).catch(alertError);
+});
+$("feishuChatList")?.addEventListener("click", (event) => {
+  const chatId = event.target?.dataset?.deleteFeishuChat;
+  if (chatId) deleteFeishuChatBinding(chatId).catch(alertError);
+});
 $("refreshModels").addEventListener("click", () => loadAll().catch(alertError));
 $("clearTasks").addEventListener("click", () => requestClearTasks());
 $("adminScreen")?.addEventListener("change", (event) => {
   if (event.target?.id === "taskUserFilter") handleTaskUserFilterChange(event);
+  if (event.target?.id === "taskSourceFilter") handleTaskSourceFilterChange(event);
 });
 
 $("modelList").addEventListener("click", (event) => {

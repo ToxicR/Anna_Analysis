@@ -14,9 +14,12 @@ FILES = [
     "src/db.ts",
     "src/types.ts",
     "src/server.ts",
+    "src/services/analysis-runner.ts",
     "src/services/app-users.ts",
+    "src/services/ai.ts",
     "static/app.js",
     "static/index.html",
+    "static/styles.css",
     "static/admin.js",
     "static/admin.html",
 ]
@@ -54,6 +57,7 @@ for rel in FILES:
     sftp.put(str(local), remote)
     print("uploaded", rel)
 
+upload_tree(sftp, ROOT / "src/services/feishu", f"{REMOTE}/src/services/feishu")
 upload_tree(sftp, ROOT / "dist", f"{REMOTE}/dist")
 sftp.close()
 

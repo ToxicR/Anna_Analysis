@@ -19,7 +19,8 @@ import {
 } from "./auth.js";
 import { db, boolToInt, flagToBoolean, getSetting, initDb, normalizeRow, normalizeRows, nowIso, setSetting } from "./db.js";
 import { STATIC_DIR, UPLOAD_DIR } from "./paths.js";
-import { inferAnalysisType, analyzeWithModel, startCursorSessionMaintenance, type AnalysisResult, type OutputMode } from "./services/ai.js";
+import { startCursorSessionMaintenance, type AnalysisResult, type OutputMode } from "./services/ai.js";
+import { getEnabledReposForProject, runAnalysis } from "./services/analysis-runner.js";
 import { initCodeFts } from "./services/code-fts.js";
 import { searchCodeForAnalysis, syncRepo, syncReposToWorkspace, validateReposForAnalysis, copyAttachmentsToWorkspace } from "./services/code.js";
 import { deleteProjectCascade, deleteRepoCascade } from "./services/project-delete.js";
@@ -28,6 +29,7 @@ import {
   createAppUser,
   changeAppUserPassword,
   deleteAppUser,
+  enableWebLoginForUser,
   getAppUserByAccount,
   getAppUserById,
   listAppUserLoginRecords,
@@ -48,6 +50,9 @@ import {
   setUserSessionCookie,
 } from "./user-auth.js";
 import type { AIModel, AnalysisTask, ChatMessage, ChatSession, GitRepo, Project, ProjectWithReposInput, RepoSlotInput } from "./types.js";
+import { registerFeishuRoutes } from "./services/feishu/routes.js";
+import { resolveWebLoginAccountSuggestion } from "./services/feishu/directory.js";
+import { getFeishuUserByAppUserId } from "./services/feishu/users.js";
 
 dotenv.config();
 initDb();
@@ -95,8 +100,6 @@ interface ProjectSyncErrorSummary {
   error: string;
 }
 
-const workspaceSyncCache = new Map<string, number>();
-const WORKSPACE_SYNC_TTL_MS = 1000 * 60 * 60 * 3;
 const MAX_CHAT_SESSIONS_PER_USER = 10;
 const DAILY_REPO_SYNC_HOUR = 2;
 const projectSyncJobs = new Map<number, Promise<ProjectSyncSummary>>();
@@ -121,6 +124,7 @@ app.addHook("onRequest", async (request, reply) => {
   if (!path.startsWith("/api/")) return;
   reply.header("Cache-Control", "no-store");
   if (path.startsWith("/api/admin")) return;
+  if (path.startsWith("/api/feishu/webhook")) return;
   if (path === "/api/auth/login" || path === "/api/auth/logout") return;
 
   const userSession = getUserSession(request);
@@ -273,14 +277,51 @@ app.post("/api/admin/users", { preHandler: requireAdmin }, async (request, reply
 app.put("/api/admin/users/:userId", { preHandler: requireAdmin }, async (request, reply) => {
   const userId = Number((request.params as { userId: string }).userId);
   const payload = request.body as { display_name?: string; enabled?: boolean; password?: string; project_access_all?: boolean; allowed_project_ids?: number[] };
-  const user = updateAppUser(userId, payload);
-  if (!user) return notFound(reply, "账号不存在");
-  return user;
+  try {
+    const user = updateAppUser(userId, payload);
+    if (!user) return notFound(reply, "用户不存在");
+    return user;
+  } catch (error) {
+    return badRequest(reply, error instanceof Error ? error.message : String(error));
+  }
+});
+
+app.post("/api/admin/users/:userId/enable-web-login", { preHandler: requireAdmin }, async (request, reply) => {
+  const userId = Number((request.params as { userId: string }).userId);
+  const payload = request.body as { account?: string };
+  try {
+    if (!getAppUserById(userId)) return notFound(reply, "用户不存在");
+    return enableWebLoginForUser(userId, payload.account ?? "");
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes("UNIQUE constraint failed: app_users.account")) {
+      return badRequest(reply, "账号已存在，请换一个账号");
+    }
+    return badRequest(reply, message);
+  }
+});
+
+app.get("/api/admin/users/:userId/web-login-suggestion", { preHandler: requireAdmin }, async (request, reply) => {
+  const userId = Number((request.params as { userId: string }).userId);
+  const user = getAppUserById(userId);
+  if (!user) return notFound(reply, "用户不存在");
+  const binding = getFeishuUserByAppUserId(userId);
+  try {
+    return await resolveWebLoginAccountSuggestion({
+      userId,
+      displayName: user.display_name,
+      feishuOpenId: binding?.open_id,
+    });
+  } catch (error) {
+    return reply.status(502).send({
+      detail: error instanceof Error ? error.message : String(error),
+    });
+  }
 });
 
 app.delete("/api/admin/users/:userId", { preHandler: requireAdmin }, async (request, reply) => {
   const userId = Number((request.params as { userId: string }).userId);
-  if (!getAppUserById(userId)) return notFound(reply, "账号不存在");
+  if (!getAppUserById(userId)) return notFound(reply, "用户不存在");
   deleteAppUser(userId);
   return { ok: true };
 });
@@ -765,10 +806,11 @@ app.delete("/api/chat/sessions/:sessionId/messages", { preHandler: requireUser }
 });
 
 app.get("/api/tasks", { preHandler: requireAdmin }, async (request) => {
-  const query = request.query as { project_id?: string; user_id?: string };
+  const query = request.query as { project_id?: string; user_id?: string; source?: string };
   const projectId = Number(query.project_id) || 0;
   const userId = Number(query.user_id) || 0;
-  return listAnalysisTasks({ projectId, userId });
+  const source = normalizeTaskSourceFilter(query.source);
+  return listAnalysisTasks({ projectId, userId, source });
 });
 
 app.delete("/api/tasks/:taskId", { preHandler: requireAdmin }, async (request, reply) => {
@@ -779,11 +821,12 @@ app.delete("/api/tasks/:taskId", { preHandler: requireAdmin }, async (request, r
 });
 
 app.delete("/api/tasks", { preHandler: requireAdmin }, async (request) => {
-  const query = request.query as { project_id?: string; user_id?: string };
+  const query = request.query as { project_id?: string; user_id?: string; source?: string };
   const projectId = Number(query.project_id) || 0;
   const userId = Number(query.user_id) || 0;
+  const source = normalizeTaskSourceFilter(query.source);
   let sql = "DELETE FROM analysis_tasks WHERE 1=1";
-  const params: number[] = [];
+  const params: Array<number | string> = [];
   if (projectId) {
     sql += " AND project_id = ?";
     params.push(projectId);
@@ -791,6 +834,10 @@ app.delete("/api/tasks", { preHandler: requireAdmin }, async (request) => {
   if (userId) {
     sql += " AND user_id = ?";
     params.push(userId);
+  }
+  if (source) {
+    sql += " AND COALESCE(source, 'web') = ?";
+    params.push(source);
   }
   const result = db.prepare(sql).run(...params);
   return { ok: true, deleted: result.changes };
@@ -803,7 +850,7 @@ function getProject(projectId: number): Project | undefined {
 
 function getUserProjectAccess(userId: number): { all: boolean; projectIds: number[] } {
   const user = getAppUserById(userId);
-  if (!user || flagToBoolean(user.project_access_all ?? true)) return { all: true, projectIds: [] };
+  if (!user || flagToBoolean(user.project_access_all)) return { all: true, projectIds: [] };
   const rows = db.prepare("SELECT project_id FROM app_user_projects WHERE user_id = ? ORDER BY project_id ASC").all(userId) as Array<{ project_id: number }>;
   return { all: false, projectIds: rows.map((row) => Number(row.project_id)) };
 }
@@ -860,9 +907,16 @@ function getTask(taskId: number): AnalysisTask | undefined {
   return db.prepare("SELECT * FROM analysis_tasks WHERE id = ?").get(taskId) as AnalysisTask | undefined;
 }
 
-function listAnalysisTasks(filters: { projectId?: number; userId?: number } = {}): AnalysisTask[] {
+function normalizeTaskSourceFilter(value?: string): "web" | "feishu" | "" {
+  const source = String(value || "").trim().toLowerCase();
+  if (source === "web" || source === "feishu") return source;
+  return "";
+}
+
+function listAnalysisTasks(filters: { projectId?: number; userId?: number; source?: "web" | "feishu" | "" } = {}): AnalysisTask[] {
   const projectId = filters.projectId || 0;
   const userId = filters.userId || 0;
+  const source = filters.source || "";
   let sql = `
     SELECT
       t.*,
@@ -872,7 +926,7 @@ function listAnalysisTasks(filters: { projectId?: number; userId?: number } = {}
     LEFT JOIN app_users u ON u.id = t.user_id
     WHERE 1=1
   `;
-  const params: number[] = [];
+  const params: Array<number | string> = [];
   if (projectId) {
     sql += " AND t.project_id = ?";
     params.push(projectId);
@@ -880,6 +934,10 @@ function listAnalysisTasks(filters: { projectId?: number; userId?: number } = {}
   if (userId) {
     sql += " AND t.user_id = ?";
     params.push(userId);
+  }
+  if (source) {
+    sql += " AND COALESCE(t.source, 'web') = ?";
+    params.push(source);
   }
   sql += " ORDER BY t.id DESC LIMIT 50";
   return normalizeRows(db.prepare(sql).all(...params) as AnalysisTask[]);
@@ -951,96 +1009,29 @@ async function executeAnalysis(
     onActivity?: (activity: { kind: string; message: string }) => void;
   },
 ): Promise<{ analysis: AnalysisResult; taskId: number }> {
-  if (!payload.repo_ids?.length) throw new Error("请至少选择一个仓库");
-  const project = getProject(payload.project_id);
-  if (!project) throw new Error("项目不存在");
-  if (userId && !userCanAccessProject(userId, payload.project_id)) {
-    throw new Error("无权访问该项目");
-  }
-
-  let repos = getReposByIds(payload.repo_ids).filter((repo) => repo.project_id === payload.project_id);
-  if (!repos.length) throw new Error("仓库与项目不匹配");
-
-  const chatSessionId = payload.chat_session_id ?? "";
-  const syncKey = buildWorkspaceSyncKey(chatSessionId, payload.project_id, payload.repo_ids);
-  const cachedAt = workspaceSyncCache.get(syncKey);
-  const canSkipSync = !payload.force_sync
-    && (payload.skip_sync || (cachedAt !== undefined && Date.now() - cachedAt < WORKSPACE_SYNC_TTL_MS))
-    && validateReposForAnalysis(payload.project_id, repos).ok;
-
-  if (canSkipSync) {
-    stream?.onStatus?.("使用本轮已同步的代码，继续分析...");
-  } else {
-    stream?.onStatus?.("正在更新仓库代码（首次或仓库变更时会较慢）...");
-    const token = getSetting("gitlab_access_token");
-    await syncReposToWorkspace(payload.project_id, repos, token);
-    workspaceSyncCache.set(syncKey, Date.now());
-    repos = getReposByIds(payload.repo_ids).filter((repo) => repo.project_id === payload.project_id);
-  }
-
-  const validation = validateReposForAnalysis(payload.project_id, repos);
-  const errors = validation.issues.filter((issue) => issue.level === "error");
-  if (errors.length) throw new Error(errors.map((issue) => issue.message).join("；"));
-
-  const warnings = validation.issues.filter((issue) => issue.level === "warning");
-  if (warnings.length) {
-    stream?.onStatus?.(warnings.map((issue) => issue.message).join("；"));
-  }
-
-  const model = payload.model_id ? getModel(payload.model_id) : getDefaultModel();
-  const question = payload.question ?? "";
-  const logText = payload.log_text ?? "";
-  const attachmentImages = normalizeAttachmentImages(payload.attachment_images);
-  const conversationContext = payload.conversation_context ?? "";
-  const outputMode = normalizeOutputMode(payload.output_mode);
-  const analysisScope = payload.analysis_scope?.trim() ?? "";
-  const analysisType = payload.analysis_type || inferAnalysisType(question, logText);
-  const chunks = searchCodeForAnalysis(repos.map((repo) => repo.id), `${question}\n${conversationContext}\n${logText}\n${analysisScope}`, analysisType);
-
-  stream?.onStatus?.("分析助手正在阅读仓库...");
-  const analysis = await analyzeWithModel(
-    model,
-    question,
-    analysisType,
-    chunks,
-    logText,
-    repos,
-    conversationContext,
-    chatSessionId,
-    outputMode,
-    attachmentImages,
+  return runAnalysis(
+    {
+      project_id: payload.project_id,
+      repo_ids: payload.repo_ids,
+      model_id: payload.model_id,
+      analysis_type: payload.analysis_type,
+      analysis_scope: payload.analysis_scope,
+      question: payload.question,
+      log_text: payload.log_text,
+      attachment_images: payload.attachment_images,
+      conversation_context: payload.conversation_context,
+      chat_session_id: payload.chat_session_id,
+      output_mode: payload.output_mode,
+      skip_sync: payload.skip_sync,
+      force_sync: payload.force_sync,
+      user_id: userId ?? null,
+      source: "web",
+    },
     stream,
-    analysisScope,
+    {
+      assertProjectAccess: (subjectUserId, projectId) => userCanAccessProject(subjectUserId, projectId),
+    },
   );
-
-  const insertResult = db.prepare(`
-    INSERT INTO analysis_tasks(
-      project_id, model_id, analysis_type, question, log_text, selected_repo_ids,
-      status, result, agent_id, run_id, workspace_path, analysis_scope, user_id, chat_session_id, created_at
-    )
-    VALUES (?, ?, ?, ?, ?, ?, 'completed', ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    payload.project_id,
-    model?.id ?? null,
-    analysisType,
-    question,
-    logText,
-    payload.repo_ids.join(","),
-    analysis.text,
-    analysis.agentId ?? "",
-    analysis.runId ?? "",
-    analysis.workspacePath ?? validation.workspace_path,
-    analysisScope,
-    userId ?? null,
-    chatSessionId,
-    nowIso(),
-  );
-
-  return { analysis, taskId: Number(insertResult.lastInsertRowid) };
-}
-
-function buildWorkspaceSyncKey(chatSessionId: string, projectId: number, repoIds: number[]): string {
-  return `${chatSessionId || "default"}::${projectId}::${[...repoIds].sort((a, b) => a - b).join(",")}`;
 }
 
 function generateChatSessionId(): string {
@@ -1242,11 +1233,6 @@ function applyRepoSlot(projectId: number, projectName: string, kind: "Android" |
   }
 }
 
-function getEnabledReposForProject(projectId: number): GitRepo[] {
-  const rows = db.prepare("SELECT * FROM git_repos WHERE project_id = ? AND enabled = 1 ORDER BY id DESC").all(projectId) as GitRepo[];
-  return normalizeRows(rows);
-}
-
 async function doSyncProjectCode(projectId: number): Promise<ProjectSyncSummary> {
   const project = getProject(projectId);
   if (!project) throw new Error("项目不存在");
@@ -1342,6 +1328,8 @@ function duplicateError(reply: FastifyReply, error: unknown) {
   }
   return badRequest(reply, `保存失败：${message}`);
 }
+
+registerFeishuRoutes(app, requireAdmin);
 
 const port = Number(process.env.PORT || 8765);
 const host = process.env.HOST || "127.0.0.1";

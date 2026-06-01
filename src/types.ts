@@ -57,9 +57,98 @@ export interface AnalysisTask {
   analysis_scope?: string;
   user_id?: number | null;
   chat_session_id?: string;
+  source?: string;
+  feishu_chat_id?: string;
+  feishu_open_id?: string;
+  feishu_session_id?: string;
   user_account?: string;
   user_display_name?: string;
   created_at: string;
+}
+
+export type FeishuSessionMode = "personal" | "shared";
+
+export interface FeishuUserBinding {
+  open_id: string;
+  app_user_id: number;
+  union_id: string;
+  display_name: string;
+  enabled: boolean | number;
+  created_at: string;
+  updated_at: string;
+  app_user_account?: string;
+  app_user_display_name?: string;
+}
+
+export interface FeishuChatBinding {
+  chat_id: string;
+  chat_type: string;
+  name: string;
+  enabled: boolean | number;
+  allow_shared_mode: boolean | number;
+  created_at: string;
+  updated_at: string;
+  project_ids: number[];
+}
+
+export interface FeishuChatSession {
+  id: string;
+  app_user_id: number | null;
+  project_id: number;
+  title: string;
+  model_id: number | null;
+  output_mode: string;
+  analysis_scope: string;
+  repo_ids: string;
+  mode: FeishuSessionMode;
+  chat_id: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface FeishuChatMessage {
+  id: number;
+  session_id: string;
+  open_id: string;
+  role: string;
+  meta: string;
+  body: string;
+  created_at: string;
+}
+
+export interface FeishuSessionLink {
+  id: number;
+  chat_id: string;
+  open_id: string;
+  mode: FeishuSessionMode;
+  session_id: string;
+  current_project_id: number | null;
+  shared_started_by_open_id: string;
+  last_open_id: string;
+  updated_at: string;
+}
+
+export interface FeishuSettingsPublic {
+  configured: boolean;
+  app_id: string;
+  app_secret: string;
+  verification_token: string;
+  encrypt_key: string;
+  webhook_path: string;
+}
+
+export interface FeishuDirectoryUserOption {
+  open_id: string;
+  union_id: string;
+  name: string;
+  user_id?: string;
+  mobile?: string;
+}
+
+export interface FeishuAvailableProject {
+  id: number;
+  name: string;
+  code: string;
 }
 
 export interface RepoValidationIssue {
@@ -129,6 +218,7 @@ export interface AppUser {
   display_name: string;
   enabled: boolean | number;
   must_change_password?: boolean | number;
+  web_login_enabled?: boolean | number;
   project_access_all?: boolean | number;
   created_at: string;
 }
@@ -139,8 +229,10 @@ export interface AppUserPublic {
   display_name: string;
   enabled: boolean;
   must_change_password: boolean;
+  web_login_enabled: boolean;
   project_access_all: boolean;
   allowed_project_ids: number[];
+  feishu_open_id?: string;
   created_at: string;
 }
 
