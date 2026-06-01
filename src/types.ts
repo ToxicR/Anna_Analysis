@@ -143,3 +143,16 @@ export interface AppUserPublic {
   allowed_project_ids: number[];
   created_at: string;
 }
+
+export interface AppUserLoginRecord {
+  id: number;
+  user_id: number | null;
+  account: string;
+  success: boolean | number;
+  ip: string;
+  user_agent: string;
+  failure_reason: string;
+  created_at: string;
+  user_account?: string;
+  user_display_name?: string;
+}

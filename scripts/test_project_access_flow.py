@@ -143,6 +143,11 @@ def main():
       )
       assert_status(status, 403, "create session for denied project", denied)
 
+      status, _, login_records = request(args.base_url, "GET", "/api/admin/login-records", None, admin_cookie)
+      assert_status(status, 200, "list login records", login_records)
+      if not any(record.get("account") == account and record.get("success") is True for record in login_records):
+          raise AssertionError(f"successful login record not found for {account}: {login_records[:3]}")
+
       print("project access API test passed")
       print(json.dumps({
           "account": account,

@@ -1,6 +1,6 @@
 import { db, flagToBoolean, normalizeRow, normalizeRows, nowIso } from "../db.js";
 import { hashPassword, verifyPassword } from "../password.js";
-import type { AppUser, AppUserPublic } from "../types.js";
+import type { AppUser, AppUserLoginRecord, AppUserPublic } from "../types.js";
 
 export const DEFAULT_APP_USER_PASSWORD = "123456";
 const MIN_PASSWORD_LENGTH = 6;
@@ -122,6 +122,53 @@ export function changeAppUserPassword(userId: number, newPassword: string, curre
 export function deleteAppUser(id: number): boolean {
   const result = db.prepare("DELETE FROM app_users WHERE id = ?").run(id);
   return result.changes > 0;
+}
+
+export function recordAppUserLogin(input: {
+  userId?: number | null;
+  account: string;
+  success: boolean;
+  ip?: string;
+  userAgent?: string;
+  failureReason?: string;
+}): void {
+  db.prepare(`
+    INSERT INTO app_user_login_records(user_id, account, success, ip, user_agent, failure_reason, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    input.userId ?? null,
+    input.account.trim(),
+    input.success ? 1 : 0,
+    input.ip?.slice(0, 80) ?? "",
+    input.userAgent?.slice(0, 500) ?? "",
+    input.failureReason?.slice(0, 500) ?? "",
+    nowIso(),
+  );
+}
+
+export function listAppUserLoginRecords(input: { userId?: number; limit?: number } = {}): AppUserLoginRecord[] {
+  const limit = Math.min(Math.max(Number(input.limit || 100), 1), 500);
+  const params: number[] = [];
+  let sql = `
+    SELECT
+      r.*,
+      u.account AS user_account,
+      COALESCE(NULLIF(u.display_name, ''), u.account) AS user_display_name
+    FROM app_user_login_records r
+    LEFT JOIN app_users u ON u.id = r.user_id
+    WHERE 1=1
+  `;
+  if (input.userId) {
+    sql += " AND r.user_id = ?";
+    params.push(input.userId);
+  }
+  sql += " ORDER BY r.id DESC LIMIT ?";
+  params.push(limit);
+  return normalizeRows(db.prepare(sql).all(...params) as AppUserLoginRecord[]).map((row) => ({
+    ...row,
+    user_id: row.user_id === null || row.user_id === undefined ? null : Number(row.user_id),
+    success: flagToBoolean(row.success),
+  }));
 }
 
 export function listAppUserProjectIds(userId: number): number[] {

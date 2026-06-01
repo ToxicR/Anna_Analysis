@@ -41,6 +41,7 @@
         <button type="button" class="admin-nav-item" data-admin-page="integrations">集成配置</button>
         <button type="button" class="admin-nav-item" data-admin-page="models">AI 模型</button>
         <button type="button" class="admin-nav-item" data-admin-page="accounts">账号管理</button>
+        <button type="button" class="admin-nav-item" data-admin-page="login-records">登录记录</button>
         <button type="button" class="admin-nav-item" data-admin-page="history">分析历史</button>
       </nav>
 
@@ -176,6 +177,17 @@
           </section>
         </section>
 
+        <section id="adminPageLoginRecords" class="admin-page-panel" data-page="login-records" hidden>
+          <section class="panel">
+            <div class="panel-heading">
+              <h2>用户登录记录</h2>
+              <button id="refreshLoginRecords" type="button">刷新</button>
+            </div>
+            <p class="panel-intro">记录前端登录页的成功与失败登录尝试，包含账号、时间、IP 和失败原因。</p>
+            <div id="loginRecordList" class="list admin-list"></div>
+          </section>
+        </section>
+
         <section id="adminPageHistory" class="admin-page-panel" data-page="history" hidden>
           <section class="panel">
             <div class="panel-heading">
@@ -286,6 +298,6 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260528-user-project-access"></script>
+  <script src="/static/admin.js?v=20260528-login-records-page"></script>
 </body>
 </html>

@@ -165,11 +165,26 @@ export function initDb(): void {
     );
 
     CREATE INDEX IF NOT EXISTS ix_app_user_projects_project_id ON app_user_projects(project_id);
+
+    CREATE TABLE IF NOT EXISTS app_user_login_records (
+      id INTEGER PRIMARY KEY,
+      user_id INTEGER REFERENCES app_users(id) ON DELETE SET NULL,
+      account VARCHAR(80) NOT NULL,
+      success BOOLEAN NOT NULL DEFAULT 0,
+      ip VARCHAR(80) DEFAULT '',
+      user_agent TEXT DEFAULT '',
+      failure_reason TEXT DEFAULT '',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_app_user_login_records_user_id ON app_user_login_records(user_id);
+    CREATE INDEX IF NOT EXISTS ix_app_user_login_records_created_at ON app_user_login_records(created_at);
   `);
   migrateChatSessionUserColumn();
   migrateAnalysisTaskColumns();
   migrateAppUserPasswordFlag();
   migrateAppUserProjectAccess();
+  migrateAppUserLoginRecords();
 }
 
 function migrateAppUserPasswordFlag(): void {
@@ -194,6 +209,24 @@ function migrateAppUserProjectAccess(): void {
     );
 
     CREATE INDEX IF NOT EXISTS ix_app_user_projects_project_id ON app_user_projects(project_id);
+  `);
+}
+
+function migrateAppUserLoginRecords(): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS app_user_login_records (
+      id INTEGER PRIMARY KEY,
+      user_id INTEGER REFERENCES app_users(id) ON DELETE SET NULL,
+      account VARCHAR(80) NOT NULL,
+      success BOOLEAN NOT NULL DEFAULT 0,
+      ip VARCHAR(80) DEFAULT '',
+      user_agent TEXT DEFAULT '',
+      failure_reason TEXT DEFAULT '',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_app_user_login_records_user_id ON app_user_login_records(user_id);
+    CREATE INDEX IF NOT EXISTS ix_app_user_login_records_created_at ON app_user_login_records(created_at);
   `);
 }
 

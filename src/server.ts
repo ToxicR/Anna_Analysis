@@ -28,8 +28,11 @@ import {
   createAppUser,
   changeAppUserPassword,
   deleteAppUser,
+  getAppUserByAccount,
   getAppUserById,
+  listAppUserLoginRecords,
   listAppUsers,
+  recordAppUserLogin,
   updateAppUser,
   verifyAppUserCredentials,
 } from "./services/app-users.js";
@@ -193,8 +196,26 @@ app.post("/api/auth/login", async (request, reply) => {
   const payload = request.body as { account?: string; password?: string };
   const account = payload.account?.trim() ?? "";
   const password = payload.password ?? "";
+  const existingUser = account ? getAppUserByAccount(account) : undefined;
   const user = verifyAppUserCredentials(account, password);
-  if (!user) return reply.status(401).send({ detail: "账号或密码错误，或账号已禁用" });
+  if (!user) {
+    recordAppUserLogin({
+      userId: existingUser?.id ?? null,
+      account,
+      success: false,
+      ip: request.ip,
+      userAgent: String(request.headers["user-agent"] || ""),
+      failureReason: existingUser && !flagToBoolean(existingUser.enabled) ? "账号已禁用" : "账号或密码错误",
+    });
+    return reply.status(401).send({ detail: "账号或密码错误，或账号已禁用" });
+  }
+  recordAppUserLogin({
+    userId: user.id,
+    account: user.account,
+    success: true,
+    ip: request.ip,
+    userAgent: String(request.headers["user-agent"] || ""),
+  });
   const token = createUserSession(user.id, user.account);
   setUserSessionCookie(reply, token);
   return user;
@@ -220,6 +241,14 @@ app.post("/api/auth/logout", async (request, reply) => {
 
 app.get("/api/admin/users", { preHandler: requireAdmin }, async () => {
   return listAppUsers();
+});
+
+app.get("/api/admin/login-records", { preHandler: requireAdmin }, async (request) => {
+  const query = request.query as { user_id?: string; limit?: string };
+  return listAppUserLoginRecords({
+    userId: Number(query.user_id) || undefined,
+    limit: Number(query.limit) || 100,
+  });
 });
 
 app.post("/api/admin/users", { preHandler: requireAdmin }, async (request, reply) => {

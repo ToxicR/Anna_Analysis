@@ -4,6 +4,7 @@ const state = {
   models: [],
   tasks: [],
   users: [],
+  loginRecords: [],
   taskUserFilter: "",
   settings: {},
   editingProjectId: null,
@@ -32,6 +33,10 @@ const ADMIN_PAGES = {
   accounts: {
     title: "账号管理",
     desc: "创建和管理前端分析页登录账号",
+  },
+  "login-records": {
+    title: "登录记录",
+    desc: "查看前端用户登录成功与失败的审计记录",
   },
   history: {
     title: "分析历史",
@@ -119,6 +124,9 @@ function switchAdminPage(page) {
     syncTaskUserFilterFromDom();
     refreshTasksData().catch(alertError);
   }
+  if (page === "login-records") {
+    refreshLoginRecordsData().catch(alertError);
+  }
 }
 
 async function checkAuth() {
@@ -195,12 +203,24 @@ async function loadAll() {
   state.settings = settings;
   state.users = users;
   render();
+  if (state.activePage === "login-records") {
+    await refreshLoginRecordsData();
+  }
 }
 
 async function refreshUsersData() {
   state.users = await api("/api/admin/users");
   renderUsers();
   renderTaskUserFilter();
+}
+
+async function refreshLoginRecordsData() {
+  const list = $("loginRecordList");
+  if (list) {
+    list.innerHTML = `<div class="item"><small>加载中...</small></div>`;
+  }
+  state.loginRecords = await api("/api/admin/login-records");
+  renderLoginRecords();
 }
 
 async function refreshProjectsData() {
@@ -255,6 +275,9 @@ function render() {
   renderModels();
   renderSettings();
   renderUsers();
+  if (state.activePage === "login-records") {
+    renderLoginRecords();
+  }
   renderTaskUserFilter();
   renderTasks();
 }
@@ -482,6 +505,29 @@ function renderTasks() {
         <div class="actions">
           <button data-delete-task="${task.id}" class="danger">删除</button>
         </div>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderLoginRecords() {
+  const list = $("loginRecordList");
+  if (!list) return;
+  if (!state.loginRecords.length) {
+    list.innerHTML = `<div class="item"><small>暂无登录记录。</small></div>`;
+    return;
+  }
+  list.innerHTML = state.loginRecords.map((record) => {
+    const status = record.success ? "成功" : "失败";
+    const statusClass = record.success ? "" : "danger";
+    const userLabel = record.user_display_name || record.user_account || record.account || "未知账号";
+    const reason = record.success ? "" : ` · ${escapeHtml(record.failure_reason || "登录失败")}`;
+    const ip = record.ip ? ` · IP：${escapeHtml(record.ip)}` : "";
+    return `
+      <div class="item">
+        <strong>${escapeHtml(userLabel)} <span class="${statusClass}">${status}</span></strong>
+        <small>${escapeHtml(record.account)} · ${escapeHtml(formatDateTime(record.created_at))}${ip}${reason}</small>
+        <small>${escapeHtml(record.user_agent || "")}</small>
       </div>
     `;
   }).join("");
@@ -787,6 +833,7 @@ document.querySelector(".admin-confirm-modal")?.addEventListener("click", (event
 $("saveGitlabToken").addEventListener("click", () => saveGitlabToken().catch(alertError));
 $("toggleGitlabToken")?.addEventListener("click", toggleGitlabTokenVisibility);
 $("syncAllProjects")?.addEventListener("click", () => syncAllProjects().catch(alertError));
+$("refreshLoginRecords")?.addEventListener("click", () => refreshLoginRecordsData().catch(alertError));
 $("refreshModels").addEventListener("click", () => loadAll().catch(alertError));
 $("clearTasks").addEventListener("click", () => requestClearTasks());
 $("adminScreen")?.addEventListener("change", (event) => {
