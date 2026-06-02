@@ -247,8 +247,8 @@
             </div>
             <p class="panel-intro">选择全站默认分析引擎。用户在前端仍可切换 Cursor / 第三方（需已配置第三方模型）。第三方模式通过 <code>cursor-sdk-gateway</code> 接入，需模型支持流式与 tool calling。</p>
             <div id="analysisProviderSwitch" class="admin-model-provider-switch" role="radiogroup" aria-label="分析引擎">
-              <button type="button" class="admin-model-provider-btn is-active" data-provider="cursor" role="radio" aria-checked="true">Cursor 模型</button>
-              <button type="button" class="admin-model-provider-btn" data-provider="third_party" role="radio" aria-checked="false">第三方模型</button>
+              <button type="button" class="admin-model-provider-btn is-active" data-provider="cursor" data-analysis-provider="cursor" role="radio" aria-checked="true">Cursor 模型</button>
+              <button type="button" class="admin-model-provider-btn" data-provider="third_party" data-analysis-provider="third_party" role="radio" aria-checked="false">第三方模型</button>
             </div>
             <p id="analysisProviderStatus" class="field-hint"></p>
           </section>
@@ -464,6 +464,6 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260528-admin-models-ui"></script>
+  <script src="/static/admin.js?v=20260529-provider-switch3"></script>
 </body>
 </html>

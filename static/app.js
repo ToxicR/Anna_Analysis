@@ -1,62 +1,3 @@
-const QUESTION_TEMPLATES = [
-  {
-    id: "feature-how",
-    category: "功能了解",
-    label: "功能怎么实现",
-    analysisType: "feature",
-    prompt: "请说明【功能名称，如：首页温度显示】是怎么实现的？请说明：用户看到什么、背后经过哪些步骤、Android 和 C++ 各做什么。",
-  },
-  {
-    id: "feature-flow",
-    category: "功能了解",
-    label: "业务流程",
-    analysisType: "feature",
-    prompt: "请梳理【业务场景，如：用户点击支付到完成订单】的完整流程，说明关键步骤、涉及页面/模块，以及可能失败的地方。",
-  },
-  {
-    id: "feature-cross",
-    category: "功能了解",
-    label: "两端如何配合",
-    analysisType: "feature",
-    prompt: "请说明【功能或接口名称】在 Android 与 C++ 之间是如何调用和传递数据的？用步骤说明，避免贴大段代码。",
-  },
-  {
-    id: "incident-crash",
-    category: "问题排查",
-    label: "崩溃/报错原因",
-    analysisType: "incident",
-    prompt: "请根据我上传的日志/截图，分析【问题现象，如：启动闪退、接口超时】的可能原因、影响范围，并给出可执行的排查建议。",
-  },
-  {
-    id: "incident-log",
-    category: "问题排查",
-    label: "日志定位问题",
-    analysisType: "incident",
-    prompt: "请结合附件日志，定位【错误关键字或时间点】对应的代码位置，说明为什么会发生，以及建议先检查什么。",
-  },
-  {
-    id: "incident-screenshot",
-    category: "问题排查",
-    label: "截图/UI 异常",
-    analysisType: "incident",
-    prompt: "请根据截图/附件，说明【界面异常现象】可能由哪些模块或配置导致，并给出验证办法。",
-  },
-  {
-    id: "impact-change",
-    category: "影响评估",
-    label: "改动影响范围",
-    analysisType: "impact",
-    prompt: "如果修改【模块/文件/接口名称】，可能影响哪些功能、页面或调用方？请按影响大小排序说明。",
-  },
-  {
-    id: "review-risk",
-    category: "代码审查",
-    label: "风险点审查",
-    analysisType: "review",
-    prompt: "请审查【模块或目录名称】是否存在明显风险（异常处理、线程、资源释放、兼容性），列出问题与建议，优先说业务影响。",
-  },
-];
-
 const SECTION_CARD_META = {
   结论: { key: "conclusion", title: "结论", icon: "结", tone: "primary" },
   关键位置: { key: "locations", title: "关键位置", icon: "位", tone: "default" },
@@ -87,11 +28,10 @@ const state = {
   activeChatSession: null,
   chatSessions: [],
   allChatSessions: [],
-  selectedTemplateId: null,
-  selectedAnalysisType: null,
   chatPanelVisible: false,
   activeAnalyses: {},
   modelProvider: "cursor",
+  defaultModelProvider: "cursor",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -188,7 +128,6 @@ function showNewChatPanel(options = {}) {
   $("appShell")?.classList.add("has-main-panel");
   $("appShell")?.classList.remove("has-active-chat");
   renderNewChatHeadline();
-  renderQuestionTemplates();
   renderSessionSummary();
   renderSidebarSessionList();
   setAnalysisStatus("准备就绪");
@@ -372,8 +311,6 @@ function resetChatState() {
   state.activeChatSession = null;
   state.chatSessions = [];
   state.allChatSessions = [];
-  state.selectedTemplateId = null;
-  state.selectedAnalysisType = null;
   clearAttachments({ keepStatus: true });
   hideMainPanels();
   renderWelcomeMessage();
@@ -403,19 +340,27 @@ function applyModelsPayload(modelsPayload) {
   state.thirdPartyDefaultId = thirdParty.default_model_id ?? null;
   state.thirdPartyActive = state.thirdPartyEnabled
     && state.thirdPartyModels.some((model) => model.enabled && model.configured);
-  if (!canShowModelProviderSwitch() && state.modelProvider === "third_party") {
-    state.modelProvider = "cursor";
-  }
+  const activeProvider = !Array.isArray(modelsPayload) ? modelsPayload?.active_provider : null;
+  state.defaultModelProvider = activeProvider === "third_party" && state.thirdPartyActive
+    ? "third_party"
+    : "cursor";
+  state.modelProvider = getDefaultModelProvider();
 }
 
-function canShowModelProviderSwitch() {
+function isThirdPartyAvailable() {
   return state.thirdPartyEnabled
     && state.thirdPartyModels.some((model) => model.enabled && model.configured);
 }
 
+function getDefaultModelProvider() {
+  if (state.defaultModelProvider === "third_party" && isThirdPartyAvailable()) {
+    return "third_party";
+  }
+  return "cursor";
+}
+
 function getAnalysisModelProvider() {
-  if (!canShowModelProviderSwitch()) return "cursor";
-  return state.modelProvider === "third_party" ? "third_party" : "cursor";
+  return getDefaultModelProvider();
 }
 
 function renderModelSelectForProvider(provider, preferredModelId = null) {
@@ -459,24 +404,10 @@ function renderModelSelectForProvider(provider, preferredModelId = null) {
 }
 
 function setAnalysisModelProvider(provider, options = {}) {
-  const next = provider === "third_party" && canShowModelProviderSwitch() ? "third_party" : "cursor";
+  const next = provider === "third_party" && isThirdPartyAvailable()
+    ? "third_party"
+    : getDefaultModelProvider();
   state.modelProvider = next;
-
-  const switchEl = $("modelProviderSwitch");
-  if (switchEl) {
-    switchEl.hidden = !canShowModelProviderSwitch();
-    switchEl.querySelectorAll(".model-provider-btn").forEach((btn) => {
-      const active = btn.dataset.provider === next;
-      btn.classList.toggle("is-active", active);
-      btn.setAttribute("aria-pressed", active ? "true" : "false");
-    });
-  }
-
-  const label = $("analysisModelLabel");
-  if (label) {
-    label.textContent = next === "third_party" ? "第三方模型" : "Cursor 模型";
-  }
-
   renderModelSelectForProvider(next, options.preferredModelId ?? null);
 }
 
@@ -517,6 +448,14 @@ function getSelectedRepoIds() {
     .map((repo) => repo.id);
 }
 
+function getOutputMode() {
+  return state.activeChatSession?.output_mode || "non_developer";
+}
+
+function getAnalysisScope() {
+  return state.activeChatSession?.analysis_scope?.trim() || "";
+}
+
 function captureSessionSettings() {
   const provider = getAnalysisModelProvider();
   const modelId = Number($("analysisModel").value) || null;
@@ -524,8 +463,8 @@ function captureSessionSettings() {
     model_provider: provider,
     model_id: provider === "cursor" ? modelId : null,
     third_party_model_id: provider === "third_party" ? modelId : null,
-    output_mode: $("outputMode").value,
-    analysis_scope: $("analysisScope")?.value?.trim() || "",
+    output_mode: getOutputMode(),
+    analysis_scope: getAnalysisScope(),
     repo_ids: getSelectedRepoIds(),
   };
 }
@@ -535,16 +474,12 @@ function applySessionSettings(session) {
     $("analysisProject").value = String(session.project_id);
     renderAnalysisRepos();
   }
-  const provider = session.model_provider === "third_party" && canShowModelProviderSwitch()
-    ? "third_party"
-    : "cursor";
+  const provider = getDefaultModelProvider();
   state.modelProvider = provider;
   const preferredModelId = provider === "third_party"
     ? (session.third_party_model_id || state.thirdPartyDefaultId)
     : session.model_id;
   setAnalysisModelProvider(provider, { preferredModelId });
-  if (session.output_mode) $("outputMode").value = session.output_mode;
-  if ($("analysisScope")) $("analysisScope").value = session.analysis_scope || "";
   const repoIds = session.repo_ids ? session.repo_ids.split(",").map(Number).filter(Boolean) : [];
   $("analysisRepos").querySelectorAll("input").forEach((input) => {
     input.checked = repoIds.length ? repoIds.includes(Number(input.value)) : true;
@@ -557,7 +492,7 @@ function renderWelcomeMessage() {
       <img class="avatar ai-avatar" src="/static/assets/anna-logo.png" alt="Anna AI">
       <div class="bubble">
         <div class="message-meta">Anna Analysis</div>
-        <div class="message-body">选择项目和仓库后，点击下方<strong>快速提问</strong>模板，把【括号内容】改成你的实际情况即可发送。也可直接输入问题，或上传日志/截图排查问题。</div>
+        <div class="message-body">选择项目和仓库后，直接输入问题即可开始分析；也可上传日志或截图辅助排查。</div>
       </div>
     </article>
   `;
@@ -604,16 +539,12 @@ function renderChatProjectContext() {
   }
   if (!modelName) modelName = "默认模型";
   modelName = `${provider} · ${modelName}`;
-  const outputMode = session.output_mode === "developer" ? "研发模式" : "非研发模式";
-  const scope = session.analysis_scope?.trim();
 
   const parts = [
     `项目：${project?.name || "未选择项目"}`,
     repoNames.length ? `仓库：${repoNames.join("、")}` : "仓库：未选择",
     `模型：${modelName}`,
-    outputMode,
   ];
-  if (scope) parts.push(`范围：${scope}`);
   el.textContent = parts.join(" · ");
   el.title = parts.join(" · ");
 }
@@ -646,8 +577,6 @@ function openNewChatLanding() {
   state.activeChatSession = null;
   state.chatTurns = [];
   state.chatSessionId = createChatSessionId();
-  state.selectedTemplateId = null;
-  state.selectedAnalysisType = null;
   $("newQuestion").value = "";
   $("question").value = "";
   clearAttachments({ keepStatus: true });
@@ -902,49 +831,8 @@ function closeSessionPicker() {
 
 function render() {
   renderSelectors();
-  renderQuestionTemplates();
   renderSessionSummary();
   renderSidebarSessionList();
-}
-
-function renderQuestionTemplates() {
-  const groups = [...new Set(QUESTION_TEMPLATES.map((item) => item.category))];
-  const html = groups.map((category) => {
-    const chips = QUESTION_TEMPLATES
-      .filter((item) => item.category === category)
-      .map((item) => (
-        `<button type="button" class="template-chip${state.selectedTemplateId === item.id ? " active" : ""}" data-template-id="${item.id}" title="${escapeHtml(item.prompt)}">${escapeHtml(item.label)}</button>`
-      ))
-      .join("");
-    return `<div class="template-group"><span class="template-group-label">${escapeHtml(category)}</span>${chips}</div>`;
-  }).join("");
-  for (const id of ["questionTemplates", "newQuestionTemplates"]) {
-    const container = $(id);
-    if (container) container.innerHTML = html;
-  }
-}
-
-function applyQuestionTemplate(templateId) {
-  const template = QUESTION_TEMPLATES.find((item) => item.id === templateId);
-  if (!template) return;
-  state.selectedTemplateId = template.id;
-  state.selectedAnalysisType = template.analysisType;
-  if ($("newQuestion")) $("newQuestion").value = template.prompt;
-  if ($("question")) $("question").value = template.prompt;
-  ($("newQuestion") || $("question"))?.focus();
-  const end = template.prompt.indexOf("】");
-  const input = $("newQuestion") || $("question");
-  if (end > 0 && input) {
-    input.setSelectionRange(template.prompt.indexOf("【") + 1, end);
-  }
-  renderQuestionTemplates();
-  const hint = {
-    feature: "将按「功能了解」分析",
-    incident: "建议上传日志或截图后发送",
-    impact: "将按「影响评估」分析",
-    review: "将按「代码审查」分析",
-  }[template.analysisType];
-  setAnalysisStatus(hint || "模板已填入，请修改【】中的内容");
 }
 
 function renderSelectors() {
@@ -1379,13 +1267,13 @@ async function runAnalysis(options = {}) {
       model_provider: sessionSettings.model_provider,
       model_id: sessionSettings.model_id,
       third_party_model_id: sessionSettings.third_party_model_id,
-      analysis_type: state.selectedAnalysisType || undefined,
-      analysis_scope: $("analysisScope")?.value?.trim() || "",
+      analysis_type: undefined,
+      analysis_scope: getAnalysisScope(),
       question,
       log_text: currentAttachmentText,
       attachment_images: currentAttachmentImages,
       chat_session_id: analysisSessionId,
-      output_mode: $("outputMode").value,
+      output_mode: getOutputMode(),
     }, {
       onStatus: (message) => {
         if (message) setAnalysisStatus(message);
@@ -1423,9 +1311,6 @@ async function runAnalysis(options = {}) {
     }
     await persistChatMessage("assistant", assistantText, "Anna Analysis", analysisSessionId);
     setAnalysisStatus("分析完成");
-    state.selectedTemplateId = null;
-    state.selectedAnalysisType = null;
-    renderQuestionTemplates();
     const viewingAnalysisSession = state.chatSessionId === analysisSessionId;
     clearActiveAnalysis(analysisSessionId);
     if (viewingAnalysisSession) {
@@ -1527,26 +1412,12 @@ function escapeHtml(value) {
 $("analysisProject").addEventListener("change", () => {
   renderAnalysisRepos();
 });
-$("modelProviderSwitch")?.addEventListener("click", (event) => {
-  const button = event.target.closest?.("[data-provider]");
-  if (!button?.dataset?.provider) return;
-  setAnalysisModelProvider(button.dataset.provider);
-  if (state.activeChatSession) syncSessionSettings().catch(() => {});
-  renderChatProjectContext();
-});
 $("analysisModel").addEventListener("change", () => {
   if (state.activeChatSession) syncSessionSettings().catch(() => {});
   renderChatProjectContext();
   renderSessionSummary();
 });
 $("analysisRepos").addEventListener("change", () => {
-  if (state.activeChatSession) syncSessionSettings().catch(() => {});
-  renderSessionSummary();
-});
-$("analysisScope")?.addEventListener("change", () => {
-  if (state.activeChatSession) syncSessionSettings().catch(() => {});
-});
-$("outputMode").addEventListener("change", () => {
   if (state.activeChatSession) syncSessionSettings().catch(() => {});
   renderSessionSummary();
 });
@@ -1565,10 +1436,6 @@ $("newQuestion")?.addEventListener("keydown", (event) => {
   if (event.altKey) return;
   event.preventDefault();
   runAnalysis({ fromNewPanel: true }).catch(alertError);
-});
-$("newQuestionTemplates")?.addEventListener("click", (event) => {
-  const templateId = event.target?.closest?.("[data-template-id]")?.dataset?.templateId;
-  if (templateId) applyQuestionTemplate(templateId);
 });
 ["dragenter", "dragover"].forEach((eventName) => {
   $("newChatComposer")?.addEventListener(eventName, (event) => {
@@ -1596,27 +1463,6 @@ $("sidebarSessionList").addEventListener("click", (event) => {
   }
   const sessionBtn = event.target?.closest?.("[data-session-id]");
   if (sessionBtn) loadChatSession(sessionBtn.dataset.sessionId).catch(alertError);
-});
-$("questionTemplates")?.addEventListener("click", (event) => {
-  const templateId = event.target?.closest?.("[data-template-id]")?.dataset?.templateId;
-  if (templateId) applyQuestionTemplate(templateId);
-});
-$("newQuestion")?.addEventListener("input", () => {
-  if (!state.selectedTemplateId) return;
-  const prompt = QUESTION_TEMPLATES.find((item) => item.id === state.selectedTemplateId)?.prompt;
-  if ($("newQuestion").value.trim() !== prompt) {
-    state.selectedTemplateId = null;
-    state.selectedAnalysisType = null;
-    renderQuestionTemplates();
-  }
-});
-$("question").addEventListener("input", () => {
-  if (!state.selectedTemplateId) return;
-  if ($("question").value.trim() !== QUESTION_TEMPLATES.find((item) => item.id === state.selectedTemplateId)?.prompt) {
-    state.selectedTemplateId = null;
-    state.selectedAnalysisType = null;
-    renderQuestionTemplates();
-  }
 });
 $("runAnalysis").addEventListener("click", () => runAnalysis().catch(alertError));
 $("clearChat").addEventListener("click", clearChat);

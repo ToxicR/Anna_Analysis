@@ -1,7 +1,13 @@
 import { db, nowIso } from "../../db.js";
 import type { FeishuSessionLink, FeishuSessionMode } from "../../types.js";
-import { createFeishuChatSession, getFeishuChatSession } from "./chat-store.js";
+import { releaseCursorSessionsForChat } from "../ai.js";
+import { createFeishuChatSession, getFeishuChatSession, getFeishuSessionLastActivityMs } from "./chat-store.js";
 import { getFeishuChat } from "./chats.js";
+
+/** 飞书会话无新消息后自动结束并下次重建的间隔 */
+export const FEISHU_SESSION_IDLE_MS = 5 * 60 * 1000;
+const FEISHU_IDLE_CHECK_MS = 60 * 1000;
+let feishuIdleMaintenanceStarted = false;
 
 function linkOpenId(mode: FeishuSessionMode, openId: string): string {
   return mode === "shared" ? "" : openId;
@@ -27,6 +33,68 @@ export function setActiveFeishuMode(chatId: string, openId: string, mode: Feishu
     if (chat && !chat.allow_shared_mode) throw new Error("此群未开启协作会话");
   }
   return mode;
+}
+
+export function isFeishuSessionIdle(sessionId: string): boolean {
+  const lastActivityMs = getFeishuSessionLastActivityMs(sessionId);
+  if (lastActivityMs <= 0) return false;
+  return Date.now() - lastActivityMs >= FEISHU_SESSION_IDLE_MS;
+}
+
+function feishuCursorChatSessionId(feishuSessionId: string): string {
+  return `feishu:${feishuSessionId}`;
+}
+
+/** 若会话已超过空闲时限，解除 link 并释放 Cursor Agent（不立即创建新会话） */
+export function expireIdleFeishuSessionLink(input: {
+  chatId: string;
+  openId: string;
+  mode: FeishuSessionMode;
+}): boolean {
+  const existing = getFeishuSessionLink(input.chatId, input.openId, input.mode);
+  if (!existing || !getFeishuChatSession(existing.session_id)) return false;
+  if (!isFeishuSessionIdle(existing.session_id)) return false;
+  db.prepare("DELETE FROM feishu_session_links WHERE id = ?").run(existing.id);
+  releaseCursorSessionsForChat(feishuCursorChatSessionId(existing.session_id));
+  return true;
+}
+
+function expireAllIdleFeishuSessionLinks(): void {
+  const links = db.prepare("SELECT * FROM feishu_session_links").all() as FeishuSessionLink[];
+  for (const link of links) {
+    if (!getFeishuChatSession(link.session_id)) {
+      db.prepare("DELETE FROM feishu_session_links WHERE id = ?").run(link.id);
+      continue;
+    }
+    if (!isFeishuSessionIdle(link.session_id)) continue;
+    db.prepare("DELETE FROM feishu_session_links WHERE id = ?").run(link.id);
+    releaseCursorSessionsForChat(feishuCursorChatSessionId(link.session_id));
+  }
+}
+
+export function startFeishuSessionIdleMaintenance(): void {
+  if (feishuIdleMaintenanceStarted) return;
+  feishuIdleMaintenanceStarted = true;
+  setInterval(() => {
+    expireAllIdleFeishuSessionLinks();
+  }, FEISHU_IDLE_CHECK_MS).unref?.();
+}
+
+export function ensureFeishuSessionLinkForIncoming(input: {
+  chatId: string;
+  openId: string;
+  mode: FeishuSessionMode;
+  appUserId: number;
+  projectId: number;
+  repoIds?: number[];
+  sharedStartedByOpenId?: string;
+}): { link: FeishuSessionLink; renewed: boolean } {
+  const renewed = expireIdleFeishuSessionLink({
+    chatId: input.chatId,
+    openId: input.openId,
+    mode: input.mode,
+  });
+  return { link: ensureFeishuSessionLink(input), renewed };
 }
 
 export function ensureFeishuSessionLink(input: {

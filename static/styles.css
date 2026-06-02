@@ -287,8 +287,7 @@ label {
   box-shadow: 0 0 0 3px rgba(36, 107, 254, 0.08);
 }
 
-.new-chat-select,
-.new-chat-scope-pill input {
+.new-chat-select {
   border: 0;
   background: transparent;
   padding: 0;
@@ -347,27 +346,15 @@ label {
 }
 
 .new-chat-model-pill {
-  max-width: min(240px, 42vw);
+  max-width: min(280px, 48vw);
+  padding: 0 14px;
 }
 
-.new-chat-model-select {
-  max-width: 180px;
-  font-weight: 500;
-}
-
-.new-chat-config-bar .new-chat-scope-pill {
-  flex: 1;
-  min-width: 0;
-}
-
-.new-chat-config-bar .new-chat-scope-pill input {
-  flex: 1;
-  min-width: 140px;
-  max-width: none;
-}
-
-.new-chat-scope-pill input::placeholder {
-  color: #94a3b8;
+.new-chat-model-pill .new-chat-model-select {
+  min-width: 88px;
+  max-width: min(240px, 40vw);
+  font-weight: 600;
+  color: #0f172a;
 }
 
 .new-chat-select-label {
@@ -399,27 +386,6 @@ label {
   opacity: 0.4;
   cursor: not-allowed;
   transform: none;
-}
-
-.new-chat-config-bar {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-  padding: 10px 14px 14px;
-  border-top: 1px solid #e8edf3;
-  background: rgba(255, 255, 255, 0.55);
-}
-
-.new-chat-config-bar > .new-chat-select-pill:first-child {
-  min-width: 220px;
-  padding: 0 14px;
-}
-
-.new-chat-config-bar > .new-chat-select-pill:first-child select {
-  min-width: 120px;
-  max-width: none;
-  flex: 1;
 }
 
 .new-chat-toolbar .new-chat-project-pill {
@@ -2415,6 +2381,8 @@ button.primary.danger:hover {
   padding: 0.55rem 1rem;
   border-radius: 999px;
   cursor: pointer;
+  pointer-events: auto;
+  cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
 }
 
@@ -2426,6 +2394,11 @@ button.primary.danger:hover {
   background: #fff;
   color: var(--accent, #2563eb);
   box-shadow: 0 1px 3px rgba(15, 23, 42, 0.12);
+}
+
+.admin-model-provider-switch[data-busy="1"] .admin-model-provider-btn {
+  opacity: 0.65;
+  pointer-events: none;
 }
 
 .admin-model-provider-panel .field-hint {
@@ -2639,11 +2612,6 @@ button.primary.danger:hover {
   .new-chat-model-select {
     max-width: none;
     flex: 1;
-  }
-
-  .new-chat-config-bar {
-    flex-direction: column;
-    align-items: stretch;
   }
 
   .new-chat-suggestions {

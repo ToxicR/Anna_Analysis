@@ -3,7 +3,7 @@ import { getEnabledReposForProject, runAnalysis } from "../analysis-runner.js";
 import { userCanAccessProjectForFeishu } from "./access.js";
 import { deliverFeishuText, deliverFeishuInteractiveCard, sendFeishuTextToChat } from "./api.js";
 import { appendFeishuChatMessage, getFeishuChatSession } from "./chat-store.js";
-import { prepareFeishuAttachmentsForAnalysis } from "./files.js";
+import { extractLogFilenameHint, feishuSessionHasUploads, prepareFeishuAttachmentsForAnalysis } from "./files.js";
 import { FeishuProgressReporter } from "./progress.js";
 import { FeishuStreamingAnalysisCard, formatFeishuAnalysisIntro } from "./streaming.js";
 import type { AnalysisStreamCallbacks } from "../ai.js";
@@ -70,20 +70,30 @@ export async function runFeishuAnalysisJob(
 
     let logText = "";
     let attachmentImages: { url: string }[] = [];
-    if (job.attachments?.length) {
-      if (!job.messageId) {
-        throw new Error("无法下载附件：缺少 message_id。");
-      }
-      if (useStreamingCard) {
-        await streamingCard!.setStatus("正在下载并读取附件…");
-      } else {
-        await progress.maybeSend("正在下载并读取附件…");
+    const hasNewAttachments = Boolean(job.attachments?.length);
+    const shouldPrepareAttachments = hasNewAttachments
+      || Boolean(extractLogFilenameHint(job.question))
+      || feishuSessionHasUploads(job.projectId, job.sessionId);
+
+    if (shouldPrepareAttachments) {
+      if (hasNewAttachments) {
+        if (!job.messageId) {
+          throw new Error("无法下载附件：缺少 message_id。");
+        }
+        if (useStreamingCard) {
+          await streamingCard!.setStatus("正在下载并合并会话附件…");
+        } else {
+          await progress.maybeSend("正在下载并合并会话附件…");
+        }
       }
       const prepared = await prepareFeishuAttachmentsForAnalysis({
         projectId: job.projectId,
         sessionId: job.sessionId,
-        messageId: job.messageId,
-        attachments: job.attachments,
+        messageId: job.messageId ?? "",
+        attachments: job.attachments ?? [],
+        question: job.question,
+        openId: job.openId,
+        mode: job.mode,
       });
       logText = prepared.log_text;
       attachmentImages = prepared.attachment_images;

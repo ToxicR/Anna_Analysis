@@ -19,12 +19,13 @@ import type { FeishuAvailableProject } from "../../types.js";
 import {
   clearSharedSession,
   ensureFeishuSessionLink,
+  ensureFeishuSessionLinkForIncoming,
   getFeishuSessionLink,
   resetFeishuSession,
   resolveFeishuSessionContext,
 } from "./sessions.js";
 import { appendFeishuChatMessage } from "./chat-store.js";
-import type { FeishuIncomingAttachment } from "./files.js";
+import { extractFeishuMessageAttachments, type FeishuIncomingAttachment } from "./files.js";
 
 export interface FeishuWebhookEvent {
   type?: string;
@@ -112,7 +113,7 @@ export function handleFeishuIncomingMessage(body: FeishuWebhookEvent): FeishuMes
   const rawText = extractMessageText(message?.message_type, message?.content);
   const text = stripBotMention(rawText);
   const command = parseFeishuMessage(text);
-  const attachments = extractFeishuAttachments(message?.message_type, message?.content);
+  const attachments = extractFeishuMessageAttachments(message?.message_type, message?.content);
   const messageId = message?.message_id?.trim() ?? "";
 
   if (command.name === "help") {
@@ -218,7 +219,7 @@ function enqueueFeishuAnalysis(input: {
   } = input;
 
   const mode = chatType === "p2p" ? "personal" : resolveFeishuSessionContext({ chatId, openId }).mode;
-  const link = ensureFeishuSessionLink({
+  const { link, renewed } = ensureFeishuSessionLinkForIncoming({
     chatId,
     openId,
     mode,
@@ -230,8 +231,9 @@ function enqueueFeishuAnalysis(input: {
   appendFeishuChatMessage(link.session_id, "user", question, openId);
   const projectName = projects.find((project) => project.id === projectId)?.name ?? String(projectId);
   const attachmentHint = attachments.length ? `\n附件：${attachments.map((item) => item.file_name || item.resource_type).join("、")}` : "";
+  const idleHint = renewed ? "\n已超过 5 分钟无消息，已自动开启新会话。" : "";
   return {
-    replyText: `已收到${attachments.length ? "附件，" : ""}正在分析项目「${projectName}」…\n模式：${mode === "shared" ? "群协作" : "个人"}${attachmentHint}`,
+    replyText: `已收到${attachments.length ? "附件，" : ""}正在分析项目「${projectName}」…\n模式：${mode === "shared" ? "群协作" : "个人"}${attachmentHint}${idleHint}`,
     enqueueAnalysis: {
       chatId,
       openId,
@@ -451,35 +453,7 @@ function extractPostText(content: string): string {
   }
 }
 
-function extractFeishuAttachments(messageType?: string, content?: string): FeishuIncomingAttachment[] {
-  if (!content) return [];
-  try {
-    const parsed = JSON.parse(content) as {
-      file_key?: string;
-      file_name?: string;
-      image_key?: string;
-    };
-    if (messageType === "file" && parsed.file_key) {
-      return [{
-        resource_key: parsed.file_key,
-        resource_type: "file",
-        file_name: parsed.file_name?.trim() || "attachment.bin",
-      }];
-    }
-    if (messageType === "image" && parsed.image_key) {
-      return [{
-        resource_key: parsed.image_key,
-        resource_type: "image",
-        file_name: "image.png",
-      }];
-    }
-  } catch {
-    return [];
-  }
-  return [];
-}
-
-function buildDefaultQuestionFromAttachments(attachments: FeishuIncomingAttachment[]): string {
+function buildDefaultQuestionFromAttachments(attachments: ReturnType<typeof extractFeishuMessageAttachments>): string {
   if (!attachments.length) return "";
   const names = attachments
     .map((item) => item.file_name?.trim())

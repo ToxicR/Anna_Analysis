@@ -21,6 +21,8 @@ const state = {
   settings: {},
   thirdPartyModel: null,
   thirdPartyEditingId: null,
+  /** 管理页「模型选择」未保存前的临时选项，null 表示与服务器一致 */
+  analysisProviderDraft: null,
   modelsPayload: null,
   editingProjectId: null,
   editingUserId: null,
@@ -116,7 +118,33 @@ function showLogin(message = "") {
 function showAdmin() {
   $("loginScreen").hidden = true;
   $("adminScreen").hidden = false;
+  bindAnalysisProviderSwitch();
   switchAdminPage(readAdminPageFromHash());
+}
+
+function resolveClickElement(event) {
+  const target = event?.target;
+  if (target instanceof Element) return target;
+  if (target?.parentElement instanceof Element) return target.parentElement;
+  return null;
+}
+
+function bindAnalysisProviderSwitch() {
+  const root = $("analysisProviderSwitch");
+  if (!root) return;
+  root.querySelectorAll("[data-analysis-provider]").forEach((btn) => {
+    if (btn.dataset.providerBound === "1") return;
+    btn.dataset.providerBound = "1";
+    btn.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const provider = btn.getAttribute("data-analysis-provider") || btn.dataset.provider;
+      if (!provider) return;
+      void applyAnalysisProviderChoice(provider).catch((error) => {
+        showAdminToast(error?.message || String(error), true);
+      });
+    });
+  });
 }
 
 function readAdminPageFromHash() {
@@ -225,6 +253,7 @@ async function loadAll() {
   state.modelsPayload = modelsPayload;
   state.models = Array.isArray(modelsPayload) ? modelsPayload : (modelsPayload?.models || []);
   state.thirdPartyModel = thirdPartyModel;
+  state.analysisProviderDraft = null;
   state.tasks = tasks;
   state.settings = settings;
   state.users = users;
@@ -1043,9 +1072,14 @@ async function refreshThirdPartyModelsData() {
   renderModels();
 }
 
+function getSavedAnalysisProvider() {
+  const view = state.thirdPartyModel || { enabled: false };
+  return view.enabled ? "third_party" : "cursor";
+}
+
 function getSelectedAnalysisProvider() {
-  const active = document.querySelector("#analysisProviderSwitch .admin-model-provider-btn.is-active");
-  return active?.dataset?.provider === "third_party" ? "third_party" : "cursor";
+  if (state.analysisProviderDraft) return state.analysisProviderDraft;
+  return getSavedAnalysisProvider();
 }
 
 function setAnalysisProviderSelection(provider) {
@@ -1057,16 +1091,23 @@ function setAnalysisProviderSelection(provider) {
   });
 }
 
-function renderAnalysisProviderSelection() {
+function updateAnalysisProviderStatusText() {
   const view = state.thirdPartyModel || { enabled: false, active: false, models: [] };
-  const provider = view.enabled ? "third_party" : "cursor";
-  setAnalysisProviderSelection(provider);
-
+  const provider = getSelectedAnalysisProvider();
+  const saved = getSavedAnalysisProvider();
+  const pending = provider !== saved;
   const status = $("analysisProviderStatus");
   const models = Array.isArray(view.models) ? view.models : [];
   if (!status) return;
 
   if (provider === "third_party") {
+    if (pending) {
+      const hasConfigured = models.some((item) => item.configured);
+      status.textContent = hasConfigured
+        ? "正在切换为第三方模型…"
+        : "已选择第三方模型。请先添加并完善至少一个第三方模型后再切换。";
+      return;
+    }
     if (view.active) {
       const current = models.find((item) => item.is_default) || models.find((item) => item.configured);
       status.textContent = current
@@ -1075,11 +1116,57 @@ function renderAnalysisProviderSelection() {
     } else {
       status.textContent = "已选择第三方，但尚无可用配置。请先添加并完善至少一个第三方模型后再保存。";
     }
+  } else if (pending) {
+    status.textContent = "正在切换为 Cursor 模型…";
   } else {
     const cursorDefault = state.models.find((item) => item.is_default);
     status.textContent = cursorDefault
       ? `当前使用 Cursor 模型，默认：${cursorDefault.name}`
       : "当前使用 Cursor 模型。请在下方 Cursor 列表中设置默认模型。";
+  }
+}
+
+function renderAnalysisProviderSelection() {
+  setAnalysisProviderSelection(getSelectedAnalysisProvider());
+  updateAnalysisProviderStatusText();
+}
+
+let analysisProviderSaving = false;
+
+async function applyAnalysisProviderChoice(provider) {
+  const next = provider === "third_party" ? "third_party" : "cursor";
+  state.analysisProviderDraft = next;
+  setAnalysisProviderSelection(next);
+  updateAnalysisProviderStatusText();
+
+  if (next === getSavedAnalysisProvider()) {
+    state.analysisProviderDraft = null;
+    return;
+  }
+  if (analysisProviderSaving) return;
+
+  analysisProviderSaving = true;
+  const switchEl = $("analysisProviderSwitch");
+  const saveBtn = $("saveAnalysisProvider");
+  if (switchEl) switchEl.dataset.busy = "1";
+  if (saveBtn) saveBtn.disabled = true;
+  try {
+    await api("/api/admin/third-party-settings", {
+      method: "PUT",
+      body: JSON.stringify({ provider: next }),
+    });
+    await refreshThirdPartyModelsData();
+    state.analysisProviderDraft = null;
+    showAdminToast(next === "third_party" ? "已切换为第三方模型" : "已切换为 Cursor 模型");
+  } catch (error) {
+    state.analysisProviderDraft = null;
+    renderAnalysisProviderSelection();
+    showAdminToast(error.message || String(error), true);
+    throw error;
+  } finally {
+    analysisProviderSaving = false;
+    if (switchEl) delete switchEl.dataset.busy;
+    if (saveBtn) saveBtn.disabled = false;
   }
 }
 
@@ -1179,19 +1266,7 @@ function renderModels() {
 }
 
 async function saveAnalysisProvider() {
-  const button = $("saveAnalysisProvider");
-  const provider = getSelectedAnalysisProvider();
-  if (button) button.disabled = true;
-  try {
-    await api("/api/admin/third-party-settings", {
-      method: "PUT",
-      body: JSON.stringify({ provider }),
-    });
-    await refreshThirdPartyModelsData();
-    showAdminToast(provider === "third_party" ? "已切换为第三方模型" : "已切换为 Cursor 模型");
-  } finally {
-    if (button) button.disabled = false;
-  }
+  await applyAnalysisProviderChoice(getSelectedAnalysisProvider());
 }
 
 async function submitThirdPartyModelForm() {
@@ -1695,13 +1770,7 @@ $("feishuChatList")?.addEventListener("click", (event) => {
   const chatId = event.target?.dataset?.deleteFeishuChat;
   if (chatId) deleteFeishuChatBinding(chatId).catch(alertError);
 });
-$("refreshModels").addEventListener("click", () => loadAll().catch(alertError));
-$("analysisProviderSwitch")?.addEventListener("click", (event) => {
-  const button = event.target.closest?.("[data-provider]");
-  if (!button?.dataset?.provider) return;
-  setAnalysisProviderSelection(button.dataset.provider);
-  renderAnalysisProviderSelection();
-});
+$("refreshModels")?.addEventListener("click", () => loadAll().catch(alertError));
 $("saveAnalysisProvider")?.addEventListener("click", () => saveAnalysisProvider().catch((error) => {
   showAdminToast(error.message || String(error), true);
   alertError(error);
@@ -1761,6 +1830,8 @@ $("taskList").addEventListener("click", (event) => {
   const taskId = event.target?.dataset?.deleteTask;
   if (taskId) requestDeleteTask(Number(taskId));
 });
+
+bindAnalysisProviderSwitch();
 
 checkAuth()
   .then((authed) => {

@@ -62,6 +62,7 @@ import {
 } from "./user-auth.js";
 import type { AIModel, AnalysisTask, ChatMessage, ChatSession, GitRepo, Project, ProjectWithReposInput, RepoSlotInput } from "./types.js";
 import { registerFeishuRoutes } from "./services/feishu/routes.js";
+import { startFeishuSessionIdleMaintenance } from "./services/feishu/sessions.js";
 import { resolveWebLoginAccountSuggestion } from "./services/feishu/directory.js";
 import { getFeishuUserByAppUserId } from "./services/feishu/users.js";
 
@@ -70,6 +71,7 @@ initDb();
 migrateLegacyThirdPartySettings();
 initCodeFts();
 startCursorSessionMaintenance();
+startFeishuSessionIdleMaintenance();
 
 interface UploadedAttachment {
   file_name: string;

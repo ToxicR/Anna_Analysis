@@ -59,6 +59,18 @@ export function listFeishuChatMessages(sessionId: string, limit = 200): FeishuCh
   `).all(sessionId, limit) as FeishuChatMessage[];
 }
 
+export function getFeishuSessionLastActivityMs(sessionId: string): number {
+  const session = getFeishuChatSession(sessionId);
+  const row = db.prepare(`
+    SELECT MAX(created_at) AS last_at FROM feishu_chat_messages WHERE session_id = ?
+  `).get(sessionId) as { last_at: string | null } | undefined;
+  const messageAt = row?.last_at ? Date.parse(row.last_at) : Number.NaN;
+  const sessionAt = session?.updated_at ? Date.parse(session.updated_at) : Number.NaN;
+  const candidates = [messageAt, sessionAt].filter((value) => Number.isFinite(value));
+  if (!candidates.length) return 0;
+  return Math.max(...candidates);
+}
+
 export function buildFeishuConversationContext(sessionId: string, excludeLastUserMessage = false): string {
   let messages = listFeishuChatMessages(sessionId, 40);
   if (excludeLastUserMessage) {

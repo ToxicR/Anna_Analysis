@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Anna Analysis</title>
   <link rel="icon" type="image/png" href="/static/assets/anna-logo.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260528-model-provider-switch">
+  <link rel="stylesheet" href="/static/styles.css?v=20260529-no-config-bar">
   <style>
     #appScreen:not([hidden]) .app-shell {
       display: grid;
@@ -109,13 +109,8 @@
               </label>
             </div>
             <div class="new-chat-toolbar-right">
-              <div id="modelProviderSwitch" class="model-provider-switch" hidden role="group" aria-label="分析引擎">
-                <button type="button" class="model-provider-btn is-active" data-provider="cursor">Cursor</button>
-                <button type="button" class="model-provider-btn" data-provider="third_party">第三方</button>
-              </div>
               <label class="new-chat-select-pill new-chat-model-pill">
-                <span id="analysisModelLabel" class="new-chat-select-label">模型</span>
-                <select id="analysisModel" class="new-chat-select new-chat-model-select"></select>
+                <select id="analysisModel" class="new-chat-select new-chat-model-select" aria-label="分析模型"></select>
               </label>
               <button id="newRunAnalysis" type="button" class="new-chat-send" title="发送分析" aria-label="发送分析">
                 <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" d="M12 19V5m0 0l-6 6m6-6l6 6"/></svg>
@@ -123,26 +118,9 @@
             </div>
           </div>
 
-          <div class="new-chat-config-bar">
-            <label class="new-chat-select-pill">
-              <span class="new-chat-select-label">模式</span>
-              <select id="outputMode" class="new-chat-select">
-                <option value="non_developer" selected>非研发模式</option>
-                <option value="developer">研发模式</option>
-              </select>
-            </label>
-            <label class="new-chat-select-pill new-chat-scope-pill">
-              <span class="new-chat-select-label">范围</span>
-              <input id="analysisScope" type="text" placeholder="可选，如 android/ 支付模块">
-            </label>
-          </div>
-
           <div id="analysisRepos" class="new-chat-repos-hidden" hidden></div>
         </div>
 
-        <section class="new-chat-suggestions">
-          <div id="newQuestionTemplates" class="question-templates new-chat-templates" aria-label="快速提问模板"></div>
-        </section>
         <div id="newAnalysisResult" class="new-chat-status">准备就绪</div>
       </div>
     </main>
@@ -163,7 +141,7 @@
           <img class="avatar ai-avatar" src="/static/assets/anna-logo.png" alt="Anna AI">
           <div class="bubble">
             <div class="message-meta">Anna Analysis</div>
-            <div class="message-body">选择项目和仓库后，点击下方<strong>快速提问</strong>模板，把【括号内容】改成你的实际情况即可发送。也可直接输入问题，或上传日志/截图排查问题。</div>
+            <div class="message-body">选择项目和仓库后，直接输入问题即可开始分析；也可上传日志或截图辅助排查。</div>
           </div>
         </article>
       </section>
@@ -174,8 +152,7 @@
           <button id="removeAttachment" type="button">移除</button>
         </div>
         <input id="logFile" type="file" multiple hidden>
-        <div id="questionTemplates" class="question-templates" aria-label="快速提问模板"></div>
-        <textarea id="question" rows="3" placeholder="输入问题，或点击上方模板快速开始。把【括号内容】改成你的实际情况。"></textarea>
+        <textarea id="question" rows="3" placeholder="输入你的问题，可描述功能、现象，或粘贴日志片段"></textarea>
         <div class="composer-actions">
           <div class="composer-left">
             <button id="addAttachment" type="button" class="icon-button" title="添加附件">+</button>
@@ -189,6 +166,6 @@
   </div>
   </div>
 
-  <script src="/static/app.js?v=20260528-project-access-scope"></script>
+  <script src="/static/app.js?v=20260529-no-config-bar"></script>
 </body>
 </html>

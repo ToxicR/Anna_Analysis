@@ -422,6 +422,23 @@ async function closeCursorSession(sessionKey: string): Promise<void> {
   deletePersistedSession(sessionKey);
 }
 
+/** 释放与 chat_session_id（如 feishu:fs_xxx）关联的全部 Cursor Agent 会话 */
+export function releaseCursorSessionsForChat(chatSessionId: string): void {
+  const id = chatSessionId.trim();
+  if (!id) return;
+  const prefix = `${id}::`;
+  for (const key of [...cursorSessions.keys()]) {
+    if (key !== id && !key.startsWith(prefix)) continue;
+    const session = cursorSessions.get(key);
+    cursorSessions.delete(key);
+    if (session) void disposeAgent(session.agent);
+  }
+  db.prepare(`
+    DELETE FROM cursor_agent_sessions
+    WHERE session_key = ? OR session_key GLOB ?
+  `).run(id, `${id}::*`);
+}
+
 async function disposeAgent(agent: SDKAgent): Promise<void> {
   const disposable = agent as SDKAgent & { [Symbol.asyncDispose]?: () => Promise<void>; close?: () => Promise<void> };
   if (typeof disposable[Symbol.asyncDispose] === "function") {
