@@ -25,6 +25,17 @@ import { initCodeFts } from "./services/code-fts.js";
 import { searchCodeForAnalysis, syncRepo, syncReposToWorkspace, validateReposForAnalysis, copyAttachmentsToWorkspace } from "./services/code.js";
 import { deleteProjectCascade, deleteRepoCascade } from "./services/project-delete.js";
 import { syncCursorModels } from "./services/cursor-models.js";
+import { warmupCursorRuntime } from "./services/cursor-runtime.js";
+import {
+  createThirdPartyModel,
+  deleteThirdPartyModel,
+  getThirdPartyModelAdminView,
+  getThirdPartyModelsForClient,
+  migrateLegacyThirdPartySettings,
+  setDefaultThirdPartyModel,
+  setThirdPartyAnalysisEnabled,
+  updateThirdPartyModel,
+} from "./services/third-party-models.js";
 import {
   createAppUser,
   changeAppUserPassword,
@@ -56,6 +67,7 @@ import { getFeishuUserByAppUserId } from "./services/feishu/users.js";
 
 dotenv.config();
 initDb();
+migrateLegacyThirdPartySettings();
 initCodeFts();
 startCursorSessionMaintenance();
 
@@ -75,6 +87,8 @@ interface AnalyzePayload {
   project_id: number;
   repo_ids: number[];
   model_id?: number | null;
+  third_party_model_id?: number | null;
+  model_provider?: string;
   analysis_type?: string;
   analysis_scope?: string;
   question?: string;
@@ -83,8 +97,6 @@ interface AnalyzePayload {
   conversation_context?: string;
   chat_session_id?: string;
   output_mode?: OutputMode;
-  skip_sync?: boolean;
-  force_sync?: boolean;
 }
 
 interface ProjectSyncSummary {
@@ -101,7 +113,7 @@ interface ProjectSyncErrorSummary {
 }
 
 const MAX_CHAT_SESSIONS_PER_USER = 10;
-const DAILY_REPO_SYNC_HOUR = 2;
+const REPO_SYNC_INTERVAL_HOURS = 2;
 const projectSyncJobs = new Map<number, Promise<ProjectSyncSummary>>();
 
 const app = Fastify({ logger: true, bodyLimit: 5 * 1024 * 1024 });
@@ -595,7 +607,12 @@ app.put("/api/settings/gitlab-token", { preHandler: requireAdmin }, async (reque
 
 app.get("/api/models", async () => {
   const rows = await syncCursorModels();
-  return rows.map(publicModel);
+  const thirdParty = getThirdPartyModelsForClient();
+  return {
+    models: rows.map(publicModel),
+    third_party: thirdParty,
+    active_provider: thirdParty.active_provider,
+  };
 });
 
 app.post("/api/models", async (request, reply) => {
@@ -613,6 +630,103 @@ app.put("/api/models/:modelId", { preHandler: requireAdmin }, async (request, re
 
 app.delete("/api/models/:modelId", async (request, reply) => {
   return badRequest(reply, "Cursor 模型列表由 Cursor SDK 自动获取，不支持手动删除");
+});
+
+app.get("/api/admin/third-party-models", { preHandler: requireAdmin }, async () => {
+  return getThirdPartyModelAdminView();
+});
+
+app.get("/api/admin/third-party-model", { preHandler: requireAdmin }, async () => {
+  return getThirdPartyModelAdminView();
+});
+
+app.put("/api/admin/third-party-settings", { preHandler: requireAdmin }, async (request, reply) => {
+  const payload = request.body as { enabled?: boolean; provider?: string };
+  const useThirdParty = payload.provider === "third_party"
+    ? true
+    : payload.provider === "cursor"
+      ? false
+      : payload.enabled;
+  if (useThirdParty) {
+    const view = getThirdPartyModelAdminView();
+    if (!view.models.some((model) => model.configured)) {
+      return badRequest(reply, "请先添加至少一个已配置完整的第三方模型");
+    }
+  }
+  if (useThirdParty !== undefined) {
+    setThirdPartyAnalysisEnabled(Boolean(useThirdParty));
+  }
+  void warmupCursorRuntime();
+  return getThirdPartyModelAdminView();
+});
+
+app.post("/api/admin/third-party-models", { preHandler: requireAdmin }, async (request, reply) => {
+  try {
+    const payload = request.body as {
+      name?: string;
+      provider?: string;
+      base_url?: string;
+      api_key?: string;
+      model_name?: string;
+      enabled?: boolean;
+      is_default?: boolean;
+    };
+    const created = createThirdPartyModel({
+      name: payload.name ?? "",
+      provider: payload.provider ?? "openai-compatible",
+      base_url: payload.base_url,
+      api_key: payload.api_key ?? "",
+      model_name: payload.model_name ?? "",
+      enabled: payload.enabled,
+      is_default: payload.is_default,
+    });
+    void warmupCursorRuntime();
+    return created;
+  } catch (error) {
+    return badRequest(reply, error instanceof Error ? error.message : String(error));
+  }
+});
+
+app.put("/api/admin/third-party-models/:modelId/default", { preHandler: requireAdmin }, async (request, reply) => {
+  try {
+    const modelId = Number((request.params as { modelId: string }).modelId);
+    if (!Number.isInteger(modelId) || modelId <= 0) return badRequest(reply, "无效的模型 ID");
+    const updated = setDefaultThirdPartyModel(modelId);
+    void warmupCursorRuntime();
+    return updated;
+  } catch (error) {
+    return badRequest(reply, error instanceof Error ? error.message : String(error));
+  }
+});
+
+app.put("/api/admin/third-party-models/:modelId", { preHandler: requireAdmin }, async (request, reply) => {
+  try {
+    const modelId = Number((request.params as { modelId: string }).modelId);
+    const payload = request.body as {
+      name?: string;
+      provider?: string;
+      base_url?: string;
+      api_key?: string;
+      model_name?: string;
+      enabled?: boolean;
+    };
+    const updated = updateThirdPartyModel(modelId, payload);
+    void warmupCursorRuntime();
+    return updated;
+  } catch (error) {
+    return badRequest(reply, error instanceof Error ? error.message : String(error));
+  }
+});
+
+app.delete("/api/admin/third-party-models/:modelId", { preHandler: requireAdmin }, async (request, reply) => {
+  try {
+    const modelId = Number((request.params as { modelId: string }).modelId);
+    deleteThirdPartyModel(modelId);
+    void warmupCursorRuntime();
+    return { ok: true };
+  } catch (error) {
+    return badRequest(reply, error instanceof Error ? error.message : String(error));
+  }
 });
 
 app.post("/api/analyze", { preHandler: requireUser }, async (request, reply) => {
@@ -723,6 +837,8 @@ app.post("/api/chat/sessions", { preHandler: requireUser }, async (request, repl
     project_id?: number;
     title?: string;
     model_id?: number | null;
+    third_party_model_id?: number | null;
+    model_provider?: string;
     output_mode?: string;
     analysis_scope?: string;
     repo_ids?: number[];
@@ -741,6 +857,8 @@ app.post("/api/chat/sessions", { preHandler: requireUser }, async (request, repl
     projectId,
     title: payload.title,
     modelId: payload.model_id ?? null,
+    thirdPartyModelId: payload.third_party_model_id ?? null,
+    modelProvider: normalizeModelProvider(payload.model_provider),
     outputMode: payload.output_mode,
     analysisScope: payload.analysis_scope,
     repoIds: payload.repo_ids ?? [],
@@ -765,6 +883,8 @@ app.put("/api/chat/sessions/:sessionId", { preHandler: requireUser }, async (req
   const payload = request.body as {
     title?: string;
     model_id?: number | null;
+    third_party_model_id?: number | null;
+    model_provider?: string;
     output_mode?: string;
     analysis_scope?: string;
     repo_ids?: number[];
@@ -982,22 +1102,21 @@ function isTextAttachment(fileName: string, mimeType: string): boolean {
 function formatAttachmentForPrompt(file: UploadedAttachment): string {
   const readPath = file.relative_path || file.workspace_path || file.path;
   const header = [
-    `附件：${file.file_name}`,
-    `类型：${file.mime_type || "unknown"}`,
-    `大小：${file.size} bytes`,
-    `工作区相对路径：${readPath}`,
-    `读取方式：请使用 read_file 打开 ${readPath}`,
+    file.file_name,
+    file.mime_type || "unknown",
+    `${file.size} bytes`,
+    readPath,
   ].join("\n");
 
   if (file.text) {
-    return `${header}\n内容预览：\n${file.text}`;
+    return `${header}\n\n${file.text}`;
   }
 
   if (file.mime_type.startsWith("image/")) {
-    return `${header}\n这是图片附件，已作为图片输入发送给 Agent。请结合图片中的界面、报错、图表或截图内容进行分析。`;
+    return header;
   }
 
-  return `${header}\n这是非文本附件，请根据路径读取。`;
+  return header;
 }
 
 async function executeAnalysis(
@@ -1014,16 +1133,15 @@ async function executeAnalysis(
       project_id: payload.project_id,
       repo_ids: payload.repo_ids,
       model_id: payload.model_id,
+      third_party_model_id: payload.third_party_model_id,
+      model_provider: payload.model_provider,
       analysis_type: payload.analysis_type,
       analysis_scope: payload.analysis_scope,
       question: payload.question,
       log_text: payload.log_text,
       attachment_images: payload.attachment_images,
-      conversation_context: payload.conversation_context,
       chat_session_id: payload.chat_session_id,
       output_mode: payload.output_mode,
-      skip_sync: payload.skip_sync,
-      force_sync: payload.force_sync,
       user_id: userId ?? null,
       source: "web",
     },
@@ -1115,12 +1233,18 @@ function getChatSessionDetail(sessionId: string, userId: number): { session: Cha
   return { session, messages };
 }
 
+function normalizeModelProvider(value?: string): "cursor" | "third_party" {
+  return value?.trim() === "third_party" ? "third_party" : "cursor";
+}
+
 function createChatSession(input: {
   userId: number;
   id?: string;
   projectId: number;
   title?: string;
   modelId?: number | null;
+  thirdPartyModelId?: number | null;
+  modelProvider?: string;
   outputMode?: string;
   analysisScope?: string;
   repoIds?: number[];
@@ -1133,15 +1257,20 @@ function createChatSession(input: {
   const outputMode = input.outputMode === "developer" ? "developer" : "non_developer";
   const repoIds = (input.repoIds ?? []).join(",");
   const timestamp = nowIso();
+  const modelProvider = normalizeModelProvider(input.modelProvider);
   db.prepare(`
-    INSERT INTO chat_sessions(id, user_id, project_id, title, model_id, output_mode, analysis_scope, repo_ids, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO chat_sessions(
+      id, user_id, project_id, title, model_id, third_party_model_id, model_provider, output_mode, analysis_scope, repo_ids, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     id,
     input.userId,
     input.projectId,
     title,
     input.modelId ?? null,
+    input.thirdPartyModelId ?? null,
+    modelProvider,
     outputMode,
     input.analysisScope?.trim() ?? "",
     repoIds,
@@ -1157,6 +1286,8 @@ function updateChatSession(
   payload: {
     title?: string;
     model_id?: number | null;
+    third_party_model_id?: number | null;
+    model_provider?: string;
     output_mode?: string;
     analysis_scope?: string;
     repo_ids?: number[];
@@ -1165,6 +1296,12 @@ function updateChatSession(
   const current = getChatSession(sessionId, userId)!;
   const title = payload.title?.trim() || current.title;
   const modelId = payload.model_id === undefined ? current.model_id : payload.model_id;
+  const thirdPartyModelId = payload.third_party_model_id === undefined
+    ? (current.third_party_model_id ?? null)
+    : payload.third_party_model_id;
+  const modelProvider = payload.model_provider === undefined
+    ? normalizeModelProvider(current.model_provider)
+    : normalizeModelProvider(payload.model_provider);
   const outputMode = payload.output_mode === "developer" || payload.output_mode === "non_developer"
     ? payload.output_mode
     : current.output_mode;
@@ -1172,9 +1309,9 @@ function updateChatSession(
   const repoIds = payload.repo_ids === undefined ? current.repo_ids : payload.repo_ids.join(",");
   db.prepare(`
     UPDATE chat_sessions
-    SET title = ?, model_id = ?, output_mode = ?, analysis_scope = ?, repo_ids = ?, updated_at = ?
+    SET title = ?, model_id = ?, third_party_model_id = ?, model_provider = ?, output_mode = ?, analysis_scope = ?, repo_ids = ?, updated_at = ?
     WHERE id = ? AND user_id = ?
-  `).run(title, modelId, outputMode, analysisScope, repoIds, nowIso(), sessionId, userId);
+  `).run(title, modelId, thirdPartyModelId, modelProvider, outputMode, analysisScope, repoIds, nowIso(), sessionId, userId);
   return getChatSession(sessionId, userId)!;
 }
 
@@ -1285,26 +1422,45 @@ function triggerProjectSync(projectId: number, reason: string): void {
     });
 }
 
-function msUntilNextDailyRepoSync(): number {
+function msUntilNextScheduledRepoSync(): number {
   const now = new Date();
+  const intervalMs = REPO_SYNC_INTERVAL_HOURS * 60 * 60 * 1000;
+  const dayMs = 24 * 60 * 60 * 1000;
+  const msSinceMidnight =
+    now.getHours() * 3_600_000
+    + now.getMinutes() * 60_000
+    + now.getSeconds() * 1_000
+    + now.getMilliseconds();
+
+  let nextMsSinceMidnight = Math.ceil(msSinceMidnight / intervalMs) * intervalMs;
+  if (nextMsSinceMidnight >= dayMs) {
+    const next = new Date(now);
+    next.setDate(next.getDate() + 1);
+    next.setHours(0, 0, 0, 0);
+    return next.getTime() - now.getTime();
+  }
+
   const next = new Date(now);
-  next.setHours(DAILY_REPO_SYNC_HOUR, 0, 0, 0);
-  if (next <= now) next.setDate(next.getDate() + 1);
-  return next.getTime() - now.getTime();
+  next.setHours(0, 0, 0, 0);
+  next.setTime(next.getTime() + nextMsSinceMidnight);
+  return Math.max(0, next.getTime() - now.getTime());
 }
 
-function scheduleDailyRepoSync(): void {
+function schedulePeriodicRepoSync(): void {
   const scheduleNext = () => {
     const timer = setTimeout(() => {
       void syncAllProjectCode()
         .then((summary) => {
-          app.log.info({ projectCount: summary.results.length }, "daily project code sync completed");
+          app.log.info(
+            { projectCount: summary.results.length, intervalHours: REPO_SYNC_INTERVAL_HOURS },
+            "scheduled project code sync completed",
+          );
         })
         .catch((error) => {
-          app.log.error({ err: error }, "daily project code sync failed");
+          app.log.error({ err: error, intervalHours: REPO_SYNC_INTERVAL_HOURS }, "scheduled project code sync failed");
         })
         .finally(scheduleNext);
-    }, msUntilNextDailyRepoSync());
+    }, msUntilNextScheduledRepoSync());
     timer.unref?.();
   };
   scheduleNext();
@@ -1334,5 +1490,6 @@ registerFeishuRoutes(app, requireAdmin);
 const port = Number(process.env.PORT || 8765);
 const host = process.env.HOST || "127.0.0.1";
 
+await warmupCursorRuntime();
 await app.listen({ port, host });
-scheduleDailyRepoSync();
+schedulePeriodicRepoSync();

@@ -19,6 +19,9 @@ const state = {
   taskUserFilter: "",
   taskSourceFilter: "",
   settings: {},
+  thirdPartyModel: null,
+  thirdPartyEditingId: null,
+  modelsPayload: null,
   editingProjectId: null,
   editingUserId: null,
   enablingWebLoginUserId: null,
@@ -208,17 +211,20 @@ async function logout() {
 }
 
 async function loadAll() {
-  const [projects, repos, models, tasks, settings, users] = await Promise.all([
+  const [projects, repos, modelsPayload, thirdPartyModel, tasks, settings, users] = await Promise.all([
     api("/api/projects"),
     api("/api/repos"),
     api("/api/models"),
+    api("/api/admin/third-party-models"),
     api("/api/tasks"),
     api("/api/settings/gitlab-token"),
     api("/api/admin/users"),
   ]);
   state.projects = projects;
   state.repos = repos;
-  state.models = models;
+  state.modelsPayload = modelsPayload;
+  state.models = Array.isArray(modelsPayload) ? modelsPayload : (modelsPayload?.models || []);
+  state.thirdPartyModel = thirdPartyModel;
   state.tasks = tasks;
   state.settings = settings;
   state.users = users;
@@ -1020,8 +1026,147 @@ function renderProjects() {
   }).join("");
 }
 
+function showAdminToast(message, isError = false) {
+  const toast = $("adminToast");
+  if (!toast) return;
+  toast.textContent = message;
+  toast.hidden = false;
+  toast.classList.toggle("is-error", isError);
+  clearTimeout(showAdminToast._timer);
+  showAdminToast._timer = setTimeout(() => {
+    toast.hidden = true;
+  }, 3200);
+}
+
+async function refreshThirdPartyModelsData() {
+  state.thirdPartyModel = await api("/api/admin/third-party-models");
+  renderModels();
+}
+
+function getSelectedAnalysisProvider() {
+  const active = document.querySelector("#analysisProviderSwitch .admin-model-provider-btn.is-active");
+  return active?.dataset?.provider === "third_party" ? "third_party" : "cursor";
+}
+
+function setAnalysisProviderSelection(provider) {
+  const next = provider === "third_party" ? "third_party" : "cursor";
+  document.querySelectorAll("#analysisProviderSwitch .admin-model-provider-btn").forEach((btn) => {
+    const active = btn.dataset.provider === next;
+    btn.classList.toggle("is-active", active);
+    btn.setAttribute("aria-checked", active ? "true" : "false");
+  });
+}
+
+function renderAnalysisProviderSelection() {
+  const view = state.thirdPartyModel || { enabled: false, active: false, models: [] };
+  const provider = view.enabled ? "third_party" : "cursor";
+  setAnalysisProviderSelection(provider);
+
+  const status = $("analysisProviderStatus");
+  const models = Array.isArray(view.models) ? view.models : [];
+  if (!status) return;
+
+  if (provider === "third_party") {
+    if (view.active) {
+      const current = models.find((item) => item.is_default) || models.find((item) => item.configured);
+      status.textContent = current
+        ? `当前使用第三方模型，默认：${current.name}（${current.model_name}）`
+        : "当前使用第三方模型。";
+    } else {
+      status.textContent = "已选择第三方，但尚无可用配置。请先添加并完善至少一个第三方模型后再保存。";
+    }
+  } else {
+    const cursorDefault = state.models.find((item) => item.is_default);
+    status.textContent = cursorDefault
+      ? `当前使用 Cursor 模型，默认：${cursorDefault.name}`
+      : "当前使用 Cursor 模型。请在下方 Cursor 列表中设置默认模型。";
+  }
+}
+
+function resetThirdPartyForm() {
+  state.thirdPartyEditingId = null;
+  $("thirdPartyEditingId").value = "";
+  $("tpFormName").value = "";
+  $("tpFormProvider").value = "openai-compatible";
+  $("tpFormBaseUrl").value = "";
+  $("tpFormModelName").value = "";
+  $("tpFormApiKey").value = "";
+  const input = $("tpFormApiKey");
+  const toggle = $("toggleTpFormApiKey");
+  if (input) input.type = "password";
+  if (toggle) toggle.textContent = "显示";
+  $("thirdPartyFormTitle").textContent = "添加第三方模型";
+  $("thirdPartyFormSubtitle").textContent = "配置 OpenAI 兼容或 AI Gateway 接入信息";
+  $("submitThirdPartyModel").textContent = "添加模型";
+}
+
+function fillThirdPartyForm(model) {
+  state.thirdPartyEditingId = model.id;
+  $("thirdPartyEditingId").value = String(model.id);
+  $("tpFormName").value = model.name || "";
+  $("tpFormProvider").value = model.provider === "ai-gateway" ? "ai-gateway" : "openai-compatible";
+  $("tpFormBaseUrl").value = model.base_url || "";
+  $("tpFormModelName").value = model.model_name || "";
+  $("tpFormApiKey").value = "";
+  $("thirdPartyFormTitle").textContent = `编辑：${model.name}`;
+  $("thirdPartyFormSubtitle").textContent = "留空 API Key 表示不修改";
+  $("submitThirdPartyModel").textContent = "保存修改";
+}
+
+function openThirdPartyModelModal(model = null) {
+  resetThirdPartyForm();
+  if (model) fillThirdPartyForm(model);
+  const backdrop = $("thirdPartyModelBackdrop");
+  if (backdrop) backdrop.hidden = false;
+  $("tpFormName")?.focus();
+}
+
+function closeThirdPartyModelModal() {
+  const backdrop = $("thirdPartyModelBackdrop");
+  if (backdrop) backdrop.hidden = true;
+  resetThirdPartyForm();
+}
+
+function renderThirdPartyModelList() {
+  const view = state.thirdPartyModel || { models: [] };
+  const models = Array.isArray(view.models) ? view.models : [];
+  const list = $("thirdPartyModelList");
+  if (!list) return;
+
+  list.innerHTML = models.length
+    ? models.map((model) => {
+      const isDefault = Boolean(model.is_default);
+      return `
+        <div class="item">
+          <strong>${escapeHtml(model.name)}${isDefault ? "（默认）" : ""}${!model.enabled ? "（已禁用）" : ""}</strong>
+          <small>${escapeHtml(model.provider)} · ${escapeHtml(model.model_name || "未填写模型 ID")} · ${model.configured ? "已配置 Key" : "缺少 Key"}</small>
+          <div class="actions">
+            ${isDefault
+    ? `<button type="button" class="secondary is-default-badge" disabled aria-current="true">默认</button>`
+    : `<button type="button" data-tp-default="${model.id}">设为默认</button>`}
+            <button type="button" data-tp-edit="${model.id}">编辑</button>
+            <button type="button" data-tp-delete="${model.id}" class="danger">删除</button>
+          </div>
+        </div>
+      `;
+    }).join("")
+    : `<div class="item"><small>暂无第三方模型，点击「添加第三方模型」创建。</small></div>`;
+}
+
 function renderModels() {
-  $("modelList").innerHTML = state.models.map((model) => `
+  renderAnalysisProviderSelection();
+  renderThirdPartyModelList();
+
+  const useThirdParty = Boolean(state.thirdPartyModel?.enabled);
+  const intro = $("cursorModelsIntro");
+  if (intro) {
+    intro.textContent = useThirdParty
+      ? "当前全站默认使用第三方模型；此处仍可设置 Cursor 默认，供用户在前端切换回 Cursor 时使用。"
+      : "模型列表由 Cursor SDK 自动获取，可在此设置默认 Cursor 分析模型。";
+  }
+
+  $("modelList").innerHTML = state.models.length
+    ? state.models.map((model) => `
     <div class="item">
       <strong>${escapeHtml(model.name)}${model.is_default ? "（默认）" : ""}${model.recommended ? "（推荐分析）" : ""}</strong>
       <small>Cursor · ${escapeHtml(model.model_name || "未填写模型 ID")}</small>
@@ -1029,7 +1174,92 @@ function renderModels() {
         <button data-default-model="${model.id}" ${model.is_default ? "disabled" : ""}>设为默认</button>
       </div>
     </div>
-  `).join("");
+  `).join("")
+    : `<div class="item"><small>暂无 Cursor 模型，请点击「刷新」从 SDK 拉取。</small></div>`;
+}
+
+async function saveAnalysisProvider() {
+  const button = $("saveAnalysisProvider");
+  const provider = getSelectedAnalysisProvider();
+  if (button) button.disabled = true;
+  try {
+    await api("/api/admin/third-party-settings", {
+      method: "PUT",
+      body: JSON.stringify({ provider }),
+    });
+    await refreshThirdPartyModelsData();
+    showAdminToast(provider === "third_party" ? "已切换为第三方模型" : "已切换为 Cursor 模型");
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function submitThirdPartyModelForm() {
+  const button = $("submitThirdPartyModel");
+  if (button) button.disabled = true;
+  try {
+    const editingId = Number($("thirdPartyEditingId").value) || null;
+    const payload = {
+      name: $("tpFormName").value.trim(),
+      provider: $("tpFormProvider").value,
+      base_url: $("tpFormBaseUrl").value.trim(),
+      model_name: $("tpFormModelName").value.trim(),
+      api_key: $("tpFormApiKey").value.trim(),
+    };
+    if (editingId) {
+      await api(`/api/admin/third-party-models/${editingId}`, {
+        method: "PUT",
+        body: JSON.stringify(payload),
+      });
+      showAdminToast("第三方模型已更新");
+    } else {
+      await api("/api/admin/third-party-models", {
+        method: "POST",
+        body: JSON.stringify({ ...payload, is_default: !(state.thirdPartyModel?.models?.length) }),
+      });
+      showAdminToast("第三方模型已添加");
+    }
+    closeThirdPartyModelModal();
+    await refreshThirdPartyModelsData();
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
+async function setDefaultThirdPartyModel(modelId) {
+  const list = $("thirdPartyModelList");
+  if (list) list.dataset.busy = "1";
+  try {
+    await api(`/api/admin/third-party-models/${modelId}/default`, { method: "PUT", body: JSON.stringify({}) });
+    await refreshThirdPartyModelsData();
+    showAdminToast("已设为默认第三方模型");
+  } finally {
+    if (list) delete list.dataset.busy;
+  }
+}
+
+async function deleteThirdPartyModel(modelId) {
+  const model = state.thirdPartyModel?.models?.find((item) => item.id === modelId);
+  openConfirmModal({
+    title: "删除第三方模型",
+    message: `确定删除「${model?.name || modelId}」吗？`,
+    confirmText: "删除",
+    action: async () => {
+      await api(`/api/admin/third-party-models/${modelId}`, { method: "DELETE" });
+      if (state.thirdPartyEditingId === modelId) closeThirdPartyModelModal();
+      await refreshThirdPartyModelsData();
+      showAdminToast("第三方模型已删除");
+    },
+  });
+}
+
+function toggleTpFormApiKeyVisibility() {
+  const input = $("tpFormApiKey");
+  const button = $("toggleTpFormApiKey");
+  if (!input || !button) return;
+  const show = input.type === "password";
+  input.type = show ? "text" : "password";
+  button.textContent = show ? "隐藏" : "显示";
 }
 
 function renderSettings() {
@@ -1466,6 +1696,47 @@ $("feishuChatList")?.addEventListener("click", (event) => {
   if (chatId) deleteFeishuChatBinding(chatId).catch(alertError);
 });
 $("refreshModels").addEventListener("click", () => loadAll().catch(alertError));
+$("analysisProviderSwitch")?.addEventListener("click", (event) => {
+  const button = event.target.closest?.("[data-provider]");
+  if (!button?.dataset?.provider) return;
+  setAnalysisProviderSelection(button.dataset.provider);
+  renderAnalysisProviderSelection();
+});
+$("saveAnalysisProvider")?.addEventListener("click", () => saveAnalysisProvider().catch((error) => {
+  showAdminToast(error.message || String(error), true);
+  alertError(error);
+}));
+$("openAddThirdPartyModel")?.addEventListener("click", () => openThirdPartyModelModal());
+$("closeThirdPartyModelModal")?.addEventListener("click", closeThirdPartyModelModal);
+$("thirdPartyModelBackdrop")?.addEventListener("click", (event) => {
+  if (event.target === $("thirdPartyModelBackdrop")) closeThirdPartyModelModal();
+});
+$("submitThirdPartyModel")?.addEventListener("click", () => submitThirdPartyModelForm().catch((error) => {
+  showAdminToast(error.message || String(error), true);
+  alertError(error);
+}));
+$("toggleTpFormApiKey")?.addEventListener("click", toggleTpFormApiKeyVisibility);
+$("thirdPartyModelList")?.addEventListener("click", (event) => {
+  if ($("thirdPartyModelList")?.dataset?.busy === "1") return;
+  const defaultBtn = event.target.closest?.("[data-tp-default]");
+  const editBtn = event.target.closest?.("[data-tp-edit]");
+  const deleteBtn = event.target.closest?.("[data-tp-delete]");
+  if (defaultBtn?.dataset?.tpDefault) {
+    setDefaultThirdPartyModel(Number(defaultBtn.dataset.tpDefault)).catch((error) => {
+      showAdminToast(error.message || String(error), true);
+      alertError(error);
+    });
+    return;
+  }
+  if (editBtn?.dataset?.tpEdit) {
+    const model = state.thirdPartyModel?.models?.find((item) => item.id === Number(editBtn.dataset.tpEdit));
+    if (model) openThirdPartyModelModal(model);
+    return;
+  }
+  if (deleteBtn?.dataset?.tpDelete) {
+    deleteThirdPartyModel(Number(deleteBtn.dataset.tpDelete)).catch(alertError);
+  }
+});
 $("clearTasks").addEventListener("click", () => requestClearTasks());
 $("adminScreen")?.addEventListener("change", (event) => {
   if (event.target?.id === "taskUserFilter") handleTaskUserFilterChange(event);

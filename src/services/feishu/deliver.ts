@@ -2,7 +2,7 @@ import type { FastifyBaseLogger } from "fastify";
 import { getEnabledReposForProject, runAnalysis } from "../analysis-runner.js";
 import { userCanAccessProjectForFeishu } from "./access.js";
 import { deliverFeishuText, deliverFeishuInteractiveCard, sendFeishuTextToChat } from "./api.js";
-import { appendFeishuChatMessage, buildFeishuConversationContext, getFeishuChatSession } from "./chat-store.js";
+import { appendFeishuChatMessage, getFeishuChatSession } from "./chat-store.js";
 import { prepareFeishuAttachmentsForAnalysis } from "./files.js";
 import { FeishuProgressReporter } from "./progress.js";
 import { FeishuStreamingAnalysisCard, formatFeishuAnalysisIntro } from "./streaming.js";
@@ -89,7 +89,6 @@ export async function runFeishuAnalysisJob(
       attachmentImages = prepared.attachment_images;
     }
 
-    const conversationContext = buildFeishuConversationContext(job.sessionId, true);
     const cursorSessionKey = `feishu:${job.sessionId}`;
 
     const { analysis } = await runAnalysis(
@@ -99,7 +98,6 @@ export async function runFeishuAnalysisJob(
         question: job.question,
         log_text: logText || undefined,
         attachment_images: attachmentImages.length ? attachmentImages : undefined,
-        conversation_context: conversationContext,
         chat_session_id: cursorSessionKey,
         output_mode: "non_developer",
         user_id: job.appUserId,

@@ -1,31 +1,28 @@
-import { db, getSetting, normalizeRow, normalizeRows, nowIso } from "../db.js";
-import { inferAnalysisType, analyzeWithModel, type AnalysisResult, type AnalysisStreamCallbacks, type OutputMode } from "./ai.js";
-import { searchCodeForAnalysis, syncReposToWorkspace, validateReposForAnalysis } from "./code.js";
+import { db, normalizeRow, normalizeRows, nowIso } from "../db.js";
+import { inferAnalysisType, analyzeWithModel, type AnalysisResult, type AnalysisStreamCallbacks } from "./ai.js";
+import { isThirdPartyProvider, resolveEffectiveAnalysisModel } from "./cursor-runtime.js";
+import { validateReposForAnalysis } from "./code.js";
 import type { AIModel, GitRepo, Project } from "../types.js";
 
 export interface RunAnalysisInput {
   project_id: number;
   repo_ids: number[];
   model_id?: number | null;
+  third_party_model_id?: number | null;
+  model_provider?: string;
   analysis_type?: string;
   analysis_scope?: string;
   question?: string;
   log_text?: string;
   attachment_images?: { url: string }[];
-  conversation_context?: string;
   chat_session_id?: string;
-  output_mode?: OutputMode;
-  skip_sync?: boolean;
-  force_sync?: boolean;
+  output_mode?: string;
   user_id?: number | null;
   source?: "web" | "feishu";
   feishu_chat_id?: string;
   feishu_open_id?: string;
   feishu_session_id?: string;
 }
-
-const workspaceSyncCache = new Map<string, number>();
-const WORKSPACE_SYNC_TTL_MS = 1000 * 60 * 60 * 3;
 
 function getProject(projectId: number): Project | undefined {
   const row = db.prepare("SELECT * FROM projects WHERE id = ?").get(projectId) as Project | undefined;
@@ -53,14 +50,6 @@ function getDefaultModel(): AIModel | undefined {
   return row ? normalizeRow(row) : undefined;
 }
 
-function buildWorkspaceSyncKey(chatSessionId: string, projectId: number, repoIds: number[]): string {
-  return `${chatSessionId || "default"}::${projectId}::${[...repoIds].sort((a, b) => a - b).join(",")}`;
-}
-
-function normalizeOutputMode(value?: string): OutputMode {
-  return value === "developer" ? "developer" : "non_developer";
-}
-
 function normalizeAttachmentImages(images?: { url: string }[]) {
   return (images ?? []).filter((item) => item?.url?.trim()).map((item) => ({ url: item.url.trim() }));
 }
@@ -77,63 +66,47 @@ export async function runAnalysis(
     throw new Error("无权访问该项目");
   }
 
-  let repos = getReposByIds(payload.repo_ids).filter((repo) => repo.project_id === payload.project_id);
+  const repos = getReposByIds(payload.repo_ids).filter((repo) => repo.project_id === payload.project_id);
   if (!repos.length) throw new Error("仓库与项目不匹配");
 
   const chatSessionId = payload.chat_session_id ?? "";
-  const syncKey = buildWorkspaceSyncKey(chatSessionId, payload.project_id, payload.repo_ids);
-  const cachedAt = workspaceSyncCache.get(syncKey);
-  const canSkipSync = !payload.force_sync
-    && (payload.skip_sync || (cachedAt !== undefined && Date.now() - cachedAt < WORKSPACE_SYNC_TTL_MS))
-    && validateReposForAnalysis(payload.project_id, repos).ok;
-
-  if (canSkipSync) {
-    stream?.onStatus?.("使用本轮已同步的代码，继续分析...");
-  } else {
-    stream?.onStatus?.("正在更新仓库代码（首次或仓库变更时会较慢）...");
-    const token = getSetting("gitlab_access_token");
-    await syncReposToWorkspace(payload.project_id, repos, token);
-    workspaceSyncCache.set(syncKey, Date.now());
-    repos = getReposByIds(payload.repo_ids).filter((repo) => repo.project_id === payload.project_id);
-  }
-
+  const question = payload.question ?? "";
+  const logText = payload.log_text ?? "";
+  const attachmentImages = normalizeAttachmentImages(payload.attachment_images);
   const validation = validateReposForAnalysis(payload.project_id, repos);
   const errors = validation.issues.filter((issue) => issue.level === "error");
-  if (errors.length) throw new Error(errors.map((issue) => issue.message).join("；"));
+  if (errors.length) {
+    throw new Error(`${errors.map((issue) => issue.message).join("；")}。请在管理后台手动同步代码，或等待定时自动同步（每天 0 点起每 2 小时）。`);
+  }
 
   const warnings = validation.issues.filter((issue) => issue.level === "warning");
   if (warnings.length) {
     stream?.onStatus?.(warnings.map((issue) => issue.message).join("；"));
   }
 
-  const model = payload.model_id ? getModel(payload.model_id) : getDefaultModel();
-  const question = payload.question ?? "";
-  const logText = payload.log_text ?? "";
-  const attachmentImages = normalizeAttachmentImages(payload.attachment_images);
-  const conversationContext = payload.conversation_context ?? "";
-  const outputMode = normalizeOutputMode(payload.output_mode);
+  const useThirdParty = payload.model_provider === "third_party";
+  const cursorModel = !useThirdParty
+    ? (payload.model_id ? getModel(payload.model_id) : getDefaultModel())
+    : undefined;
+  const thirdPartyModelId = useThirdParty ? (payload.third_party_model_id ?? null) : null;
+  const model = resolveEffectiveAnalysisModel(cursorModel, thirdPartyModelId);
+  if (model && isThirdPartyProvider(model.provider)) {
+    stream?.onStatus?.(`使用第三方模型：${model.name}（${model.model_name}）`);
+  }
+
   const analysisScope = payload.analysis_scope?.trim() ?? "";
   const analysisType = payload.analysis_type || inferAnalysisType(question, logText);
-  const chunks = searchCodeForAnalysis(
-    repos.map((repo) => repo.id),
-    `${question}\n${conversationContext}\n${logText}\n${analysisScope}`,
-    analysisType,
-  );
 
-  stream?.onStatus?.("分析助手正在阅读仓库...");
+  stream?.onStatus?.("分析助手处理中...");
   const analysis = await analyzeWithModel(
     model,
     question,
     analysisType,
-    chunks,
     logText,
     repos,
-    conversationContext,
     chatSessionId,
-    outputMode,
     attachmentImages,
     stream,
-    analysisScope,
   );
 
   const source = payload.source ?? "web";

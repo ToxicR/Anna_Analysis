@@ -193,6 +193,8 @@ export interface ChatSession {
   project_id: number;
   title: string;
   model_id: number | null;
+  third_party_model_id?: number | null;
+  model_provider?: string;
   output_mode: string;
   analysis_scope: string;
   repo_ids: string;

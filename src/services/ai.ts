@@ -1,12 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Agent, type SDKAgent, type SDKImage, type SDKMessage, type SDKUserMessage } from "@cursor/sdk";
+import type { SDKAgent, SDKImage, SDKMessage, SDKUserMessage } from "@cursor/sdk";
+import { isThirdPartyModelEnabled, isThirdPartyProvider, loadCursorSdk } from "./cursor-runtime.js";
 import { db, getSetting, setSetting } from "../db.js";
 import { DATA_DIR } from "../paths.js";
-import type { AIModel, CodeChunk, GitRepo } from "../types.js";
-import { formatContext } from "./code.js";
-import { projectWorkspaceRoot, repoWorkspaceSlot } from "./workspace.js";
+import type { AIModel, GitRepo } from "../types.js";
+import { projectWorkspaceRoot } from "./workspace.js";
 
 export interface AnalysisResult {
   text: string;
@@ -14,8 +14,6 @@ export interface AnalysisResult {
   runId?: string;
   workspacePath?: string;
 }
-
-const TWO_PHASE_ENABLED = process.env.ANALYSIS_TWO_PHASE !== "0";
 
 export interface AnalysisActivity {
   kind: "thinking" | "tool" | "status";
@@ -40,13 +38,6 @@ interface CursorSession {
 const cursorSessions = new Map<string, CursorSession>();
 const SESSION_TTL_MS = 1000 * 60 * 60 * 3;
 const SERVER_LOG_PATH = path.join(DATA_DIR, "server.log");
-const RULE_FILE_CANDIDATES = [
-  ".cursor/rules",
-  ".cursorrules",
-  "AGENTS.md",
-  ".cursor/AGENTS.md",
-];
-
 const TOOL_LABELS: Record<string, string> = {
   read_file: "阅读代码文件",
   grep: "搜索代码",
@@ -86,51 +77,35 @@ export async function analyzeWithModel(
   model: AIModel | undefined,
   question: string,
   analysisType: string,
-  chunks: CodeChunk[],
   logText: string,
   repos: GitRepo[],
-  conversationContext = "",
   chatSessionId = "",
-  outputMode: OutputMode = "non_developer",
   attachmentImages: AttachmentImage[] = [],
   stream?: AnalysisStreamCallbacks,
-  analysisScope = "",
 ): Promise<AnalysisResult> {
   if (!model || !model.model_name) {
-    const text = localAnalysis(question, analysisType, chunks, logText);
+    const text = localAnalysis(question, analysisType, logText);
     stream?.onDelta?.(text);
     return { text };
   }
 
-  return analyzeWithCursor(
-    model,
-    question,
-    analysisType,
-    chunks,
-    logText,
-    repos,
-    conversationContext,
-    chatSessionId,
-    outputMode,
-    attachmentImages,
-    stream,
-    analysisScope,
-  );
+  return analyzeWithCursor(model, question, logText, repos, chatSessionId, attachmentImages, stream);
+}
+
+function buildSdkUserMessage(question: string, logText: string, images: SDKImage[]): string | SDKUserMessage {
+  const parts = [question.trim(), logText.trim()].filter(Boolean);
+  const text = parts.join("\n\n") || " ";
+  return images.length ? { text, images } : text;
 }
 
 async function analyzeWithCursor(
   model: AIModel,
   question: string,
-  analysisType: string,
-  chunks: CodeChunk[],
   logText: string,
   repos: GitRepo[],
-  conversationContext: string,
   chatSessionId: string,
-  outputMode: OutputMode,
   attachmentImages: AttachmentImage[],
   stream?: AnalysisStreamCallbacks,
-  analysisScope = "",
 ): Promise<AnalysisResult> {
   const projectId = repos[0]?.project_id;
   if (!projectId) throw new Error("缺少项目信息，无法定位工作区");
@@ -139,39 +114,15 @@ async function analyzeWithCursor(
   const useCloud = shouldUseCloudRuntime();
   const cwd = [workspacePath];
   const sdkImages = resolveSdkImages(useCloud, attachmentImages);
-  if (attachmentImages.length && !sdkImages.length) {
-    stream?.onStatus?.(useCloud
-      ? "云端模式仅支持 https 图片链接，将改为通过附件路径文字说明分析..."
-      : "图片未能直接注入 Agent，将改为通过工作区路径读取...");
-  }
-  const sessionKey = buildSessionKey(chatSessionId, outputMode, model, repos, workspacePath, useCloud);
+  const sdkMessage = buildSdkUserMessage(question, logText, sdkImages);
+  const sessionKey = buildSessionKey(chatSessionId, model, repos, workspacePath, useCloud);
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const agent = await getOrCreateCursorAgent(sessionKey, model, cwd, repos, useCloud, stream);
     let lastRunId = "";
 
     try {
-      let researchNotes = "";
-      if (TWO_PHASE_ENABLED) {
-        stream?.onStatus?.("第 1 阶段：在仓库中调研并收集证据...");
-        const research = await runAgentTurn(
-          agent,
-          buildResearchPrompt(question, analysisType, chunks, logText, repos, conversationContext, analysisScope, workspacePath),
-          sdkImages,
-          stream,
-          false,
-        );
-        lastRunId = research.runId;
-        researchNotes = research.text;
-        writeServerLog("cursor_research_done", { runId: research.runId, agentId: agent.agentId, workspacePath, length: researchNotes.length });
-        stream?.onStatus?.("第 2 阶段：根据调研结果撰写结论...");
-      }
-
-      const finalPrompt = TWO_PHASE_ENABLED
-        ? buildFinalPrompt(question, analysisType, researchNotes, logText, repos, conversationContext, outputMode, analysisScope, workspacePath)
-        : buildCursorPrompt(question, analysisType, chunks, logText, repos, conversationContext, outputMode, analysisScope, workspacePath);
-
-      const final = await runAgentTurn(agent, finalPrompt, TWO_PHASE_ENABLED ? [] : sdkImages, stream, true);
+      const final = await runAgentTurn(agent, sdkMessage, stream, true);
       lastRunId = final.runId;
       touchCursorSession(sessionKey);
       return { text: final.text, agentId: agent.agentId, runId: lastRunId, workspacePath };
@@ -204,12 +155,10 @@ interface AgentTurnResult {
 
 async function runAgentTurn(
   agent: SDKAgent,
-  prompt: string,
-  images: SDKImage[],
+  message: string | SDKUserMessage,
   stream: AnalysisStreamCallbacks | undefined,
   streamAnswer: boolean,
 ): Promise<AgentTurnResult> {
-  const message: string | SDKUserMessage = images.length ? { text: prompt, images } : prompt;
   const run = await agent.send(message);
   let accumulated = "";
   const statusMessages: string[] = [];
@@ -245,6 +194,7 @@ async function runAgentTurn(
 }
 
 function shouldUseCloudRuntime(): boolean {
+  if (isThirdPartyModelEnabled()) return false;
   return process.env.CURSOR_AGENT_RUNTIME === "cloud" || getSetting("cursor_agent_runtime") === "cloud";
 }
 
@@ -348,9 +298,11 @@ async function getOrCreateCursorAgent(
   }
 
   const apiKey = getCursorApiKey(model);
-  if (!apiKey) throw new Error("未配置 Cursor API Key");
+  if (!apiKey && !isThirdPartyModelEnabled()) throw new Error("未配置 Cursor API Key");
 
-  const resumed = await tryResumeCursorAgent(sessionKey, model, cwd, repos, useCloud, apiKey);
+  const thirdPartyId = isThirdPartyProvider(model.provider) ? model.id : null;
+  const { Agent } = await loadCursorSdk(thirdPartyId);
+  const resumed = await tryResumeCursorAgent(Agent, sessionKey, model, cwd, repos, useCloud, apiKey ?? "cursor-sdk-gateway");
   if (resumed) {
     cursorSessions.set(sessionKey, { agentId: resumed.agentId, agent: resumed, updatedAt: Date.now() });
     stream?.onStatus?.("已恢复分析助手会话");
@@ -374,11 +326,17 @@ async function getOrCreateCursorAgent(
       });
   persistCursorSession(sessionKey, agent.agentId);
   cursorSessions.set(sessionKey, { agentId: agent.agentId, agent, updatedAt: Date.now() });
-  stream?.onStatus?.(useCloud ? "已连接云端分析助手" : "分析助手已就绪，开始阅读代码");
+  const readyHint = isThirdPartyProvider(model.provider)
+    ? `已连接第三方分析助手（${model.model_name}）`
+    : useCloud
+      ? "已连接云端分析助手"
+      : "分析助手已就绪";
+  stream?.onStatus?.(readyHint);
   return agent;
 }
 
 async function tryResumeCursorAgent(
+  Agent: typeof import("@cursor/sdk").Agent,
   sessionKey: string,
   model: AIModel,
   cwd: string[],
@@ -425,7 +383,6 @@ function deletePersistedSession(sessionKey: string): void {
 
 function buildSessionKey(
   chatSessionId: string,
-  outputMode: OutputMode,
   model: AIModel,
   repos: GitRepo[],
   workspacePath: string,
@@ -435,7 +392,7 @@ function buildSessionKey(
     .map((repo) => `${repo.id}:${repo.branch}`)
     .sort()
     .join("|");
-  return [chatSessionId || "default", outputMode, model.id, model.model_name, repoKey, workspacePath, useCloud ? "cloud" : "local"].join("::");
+  return [chatSessionId || "default", model.id, model.model_name, repoKey, workspacePath, useCloud ? "cloud" : "local"].join("::");
 }
 
 async function cleanupExpiredCursorSessions(): Promise<void> {
@@ -586,174 +543,15 @@ function formatRunFailure(
   return `分析未完成（${status}）。${runId}${sdkHint}${tail}`;
 }
 
-function workspaceLayoutSection(workspacePath: string, repos: GitRepo[]): string {
-  const manifest = path.join(workspacePath, "WORKSPACE.md");
-  const slots = repos.map((repo) => `- \`${repoWorkspaceSlot(repo)}/\` → ${repo.name}（${repo.branch || "main"}）`).join("\n");
-  const manifestText = fs.existsSync(manifest) ? fs.readFileSync(manifest, "utf8").slice(0, 2000) : "";
-  return `统一工作区根目录：${workspacePath}
-子目录：
-${slots}
-${manifestText ? `\nWORKSPACE.md：\n${manifestText}\n` : ""}`;
-}
-
-function scopeSection(analysisScope: string): string {
-  const scope = analysisScope.trim();
-  if (!scope) return "";
-  return `\n用户指定优先搜索范围（类似 Cursor @ 文件夹，请先从这里查起）：\n${scope}\n`;
-}
-
-function attachmentSection(logText: string, workspacePath: string): string {
-  if (!logText.trim()) return "";
-  return `\n用户附件（位于工作区 uploads/ 下，请用 read_file 等工具直接读取，不要只看摘要）：\n${logText.slice(0, 12000)}\n工作区根目录：${workspacePath}\n`;
-}
-
-function loadProjectRules(repos: GitRepo[]): string {
-  const sections: string[] = [];
-  for (const repo of repos) {
-    const repoPath = repo.local_path;
-    if (!repoPath) continue;
-    for (const candidate of RULE_FILE_CANDIDATES) {
-      const fullPath = path.join(repo.local_path, candidate);
-      if (!fs.existsSync(fullPath)) continue;
-      try {
-        const stat = fs.statSync(fullPath);
-        if (stat.isDirectory()) {
-          const files = fs.readdirSync(fullPath).filter((name) => name.endsWith(".md") || name.endsWith(".mdc"));
-          for (const file of files.slice(0, 5)) {
-            const content = fs.readFileSync(path.join(fullPath, file), "utf8").trim();
-            if (content) sections.push(`【${repo.name} / ${candidate}/${file}】\n${content.slice(0, 4000)}`);
-          }
-          continue;
-        }
-        const content = fs.readFileSync(fullPath, "utf8").trim();
-        if (content) sections.push(`【${repo.name} / ${candidate}】\n${content.slice(0, 6000)}`);
-      } catch {
-        // Skip unreadable rule files.
-      }
-    }
-  }
-  if (!sections.length) return "";
-  return `\n项目规则（与 Cursor IDE 一致，分析时请遵守）：\n${sections.join("\n\n")}\n`;
-}
-
-function buildResearchPrompt(
-  question: string,
-  analysisType: string,
-  chunks: CodeChunk[],
-  logText: string,
-  repos: GitRepo[],
-  conversationContext: string,
-  analysisScope: string,
-  workspacePath: string,
-): string {
-  const prefetchSection = chunks.length
-    ? `\n系统预检索线索（仅供参考）：\n${formatContext(chunks)}\n`
-    : "";
-  return `你是 Anna Analysis 的代码调研助手（第 1 阶段：只调研，不写最终业务结论）。请在统一工作区内主动搜索、打开、交叉阅读文件，像 Cursor IDE 一样工作。禁止改文件。
-${loadProjectRules(repos)}
-分析类型：${analysisType}
-${workspaceLayoutSection(workspacePath, repos)}
-${scopeSection(analysisScope)}
-用户问题：${question}
-${conversationContext.trim() ? `\n对话上下文：\n${conversationContext.slice(-12000)}\n` : ""}
-${attachmentSection(logText, workspacePath)}
-${prefetchSection}
-
-本阶段输出必须使用以下 Markdown 标题（不要输出面向业务的最终结论卡片）：
-## 调研记录
-## 已读文件
-## 搜索词与发现
-## 待验证问题
-
-要求：
-- 「已读文件」列出真实相对路径，最多 15 条。
-- 「搜索词与发现」写清已确认事实与推测。
-- 有附件时必须先读取 uploads/ 下的文件。`;
-}
-
-function buildFinalPrompt(
-  question: string,
-  analysisType: string,
-  researchNotes: string,
-  logText: string,
-  repos: GitRepo[],
-  conversationContext: string,
-  outputMode: OutputMode,
-  analysisScope: string,
-  workspacePath: string,
-): string {
-  return `${buildCursorPrompt(question, analysisType, [], logText, repos, conversationContext, outputMode, analysisScope, workspacePath)}
-
-以下是第 1 阶段调研记录（结论必须以此为准，不得脱离）：
-${researchNotes.slice(0, 16000)}`;
-}
-
-function buildCursorPrompt(
-  question: string,
-  analysisType: string,
-  chunks: CodeChunk[],
-  logText: string,
-  repos: GitRepo[],
-  conversationContext: string,
-  outputMode: OutputMode,
-  analysisScope: string,
-  workspacePath: string,
-): string {
-  const conversationSection = conversationContext.trim()
-    ? `\n对话上下文（理解“继续、它、这个问题”等指代）：\n${conversationContext.slice(-12000)}\n`
-    : "";
-  const prefetchSection = chunks.length
-    ? `\n系统预检索线索（仅供参考，你必须主动打开、搜索、交叉验证实际文件）：\n${formatContext(chunks)}\n`
-    : `\n请直接在统一工作区内搜索并阅读相关文件。\n`;
-  const projectRules = loadProjectRules(repos);
-  const evidencePriority = logText.trim()
-    ? `证据优先级：附件为主、代码为辅；先读附件中的现象/报错/截图，再用代码验证与定位。`
-    : `证据优先级：以仓库代码为准，主动检索与阅读，不要提示用户“缺少日志”。`;
-  const troubleshootingRule =
-    analysisType === "incident"
-      ? "问题排查类：结尾增加「建议下一步」最多 3 条，用非技术人员能执行的语言描述。"
-      : "非排查类：不要输出泛泛的“下一步建议”，除非用户明确要求。";
-  const outputModeRule =
-    outputMode === "non_developer"
-      ? `受众：非研发（产品/测试/运营/项目）。默认不贴代码块；用「现象、原因、影响、怎么验证、怎么处理」；技术词要白话解释；先给结论再展开。`
-      : `受众：研发。可给文件路径、方法名、必要短代码片段；区分「已确认」与「推测」。`;
-
-  return `你是 Anna Analysis 的代码分析助手，工作方式应对齐 Cursor IDE：在仓库内主动搜索、打开、交叉阅读文件，再给出结论。只读分析，禁止改文件、禁止提交、禁止破坏性命令。
-${projectRules}
-分析类型：${analysisType}
-${outputModeRule}
-
-${workspaceLayoutSection(workspacePath, repos)}
-${scopeSection(analysisScope)}
-
-用户问题：${question}
-${conversationSection}
-${attachmentSection(logText, workspacePath)}
-${prefetchSection}
-${evidencePriority}
-
-工作流程（必须执行）：
-1. 根据问题在仓库内搜索/定位相关模块（不要只依赖预检索片段）。
-2. 打开关键文件阅读，建立实现链路或故障链路。
-3. 有附件时，先用附件事实，再用代码印证。
-4. 证据不足时明确说缺什么，不要编造。
-
-输出格式（Markdown，章节标题必须完全一致，便于网页卡片展示）：
-- 已找到相关内容时，按顺序输出且仅使用这些二级标题：
-  ## 结论
-  ## 关键位置
-  ## 流程或原因说明
-  ## 依据与不确定点
-${analysisType === "incident" ? "  ## 建议下一步" : ""}
-- 未找到时，按顺序输出：
-  ## 结论
-  ## 已排除的范围
-  ## 还不确定什么
-- 「结论」第一段必须直接回答问题；默认 800 字内；每节最多 5 条 bullet。
-${troubleshootingRule}`;
-}
-
 export function getCursorApiKey(model?: AIModel): string | undefined {
+  if (isThirdPartyModelEnabled()) {
+    const envKey = process.env.CURSOR_API_KEY?.trim();
+    if (envKey) return envKey;
+    const settingKey = getSetting("cursor_api_key").trim();
+    if (settingKey) return settingKey;
+    return "cursor-sdk-gateway";
+  }
+
   const envKey = process.env.CURSOR_API_KEY?.trim();
   if (envKey) return envKey;
 
@@ -778,29 +576,16 @@ function getLegacyCursorApiKey(): string {
   return row?.api_key?.trim() ?? "";
 }
 
-function localAnalysis(question: string, analysisType: string, chunks: CodeChunk[], logText: string): string {
+function localAnalysis(question: string, analysisType: string, logText: string): string {
   const lines = [
     "## 结论摘要",
     `当前问题：${question}`,
     `系统判断类型：${analysisType}`,
     "",
-    "## 相关代码文件和关键方法",
+    "## 说明",
+    "- 未配置可用的 Cursor 模型，无法调用分析助手。",
+    "- 请先在管理后台配置 Cursor API Key 或启用第三方模型，并在管理后台手动同步代码（或等待定时自动同步）后重试。",
   ];
-
-  if (!chunks.length) {
-    lines.push("- 未检索到直接相关的代码片段，请先确认已选择仓库并同步代码。");
-  } else {
-    chunks.slice(0, 8).forEach((chunk) => {
-      lines.push(`- ${chunk.file_path}: ${chunk.language || "相关片段"}`);
-    });
-  }
-
-  lines.push("", "## 实现流程或问题原因");
-  lines.push(
-    chunks.length
-      ? "已根据当前索引列出最相关代码入口。请配置 Cursor API Key 后重新分析，以获得接近 Cursor 的跨文件阅读结论。"
-      : "缺少可引用代码上下文，无法给出可靠结论。",
-  );
 
   if (logText.trim()) {
     lines.push("", "## 日志线索");

@@ -99,7 +99,7 @@
               <h2>已添加项目</h2>
               <button id="syncAllProjects" type="button">同步所有项目代码</button>
             </div>
-            <p id="projectSyncStatus" class="panel-intro">项目创建后会自动在后台同步代码，也可手动同步。</p>
+            <p id="projectSyncStatus" class="panel-intro">项目创建后会自动在后台同步代码；系统还会在每天 0 点起每 2 小时自动同步一次，也可随时手动同步。</p>
             <div id="projectList" class="list admin-list"></div>
           </section>
         </section>
@@ -238,12 +238,36 @@
         </section>
 
         <section id="adminPageModels" class="admin-page-panel" data-page="models" hidden>
-          <section class="panel">
+          <div id="adminToast" class="admin-toast" hidden role="status"></div>
+
+          <section class="panel admin-model-provider-panel">
             <div class="panel-heading">
-              <h2>Cursor 模型</h2>
+              <h2>模型选择</h2>
+              <button type="button" id="saveAnalysisProvider" class="primary">保存选择</button>
+            </div>
+            <p class="panel-intro">选择全站默认分析引擎。用户在前端仍可切换 Cursor / 第三方（需已配置第三方模型）。第三方模式通过 <code>cursor-sdk-gateway</code> 接入，需模型支持流式与 tool calling。</p>
+            <div id="analysisProviderSwitch" class="admin-model-provider-switch" role="radiogroup" aria-label="分析引擎">
+              <button type="button" class="admin-model-provider-btn is-active" data-provider="cursor" role="radio" aria-checked="true">Cursor 模型</button>
+              <button type="button" class="admin-model-provider-btn" data-provider="third_party" role="radio" aria-checked="false">第三方模型</button>
+            </div>
+            <p id="analysisProviderStatus" class="field-hint"></p>
+          </section>
+
+          <section class="panel third-party-model-panel">
+            <div class="panel-heading">
+              <h2>第三方模型列表</h2>
+              <button type="button" id="openAddThirdPartyModel" class="primary">添加第三方模型</button>
+            </div>
+            <p class="panel-intro">已保存的 OpenAI 兼容 / AI Gateway 配置。设为默认的模型在启用「第三方模型」时作为全站默认。</p>
+            <div id="thirdPartyModelList" class="list admin-list"></div>
+          </section>
+
+          <section class="panel admin-cursor-models-panel">
+            <div class="panel-heading">
+              <h2>Cursor 模型列表</h2>
               <button id="refreshModels" type="button">刷新</button>
             </div>
-            <p class="panel-intro">模型列表由 Cursor SDK 自动获取，可在此设置默认分析模型。</p>
+            <p id="cursorModelsIntro" class="panel-intro">模型列表由 Cursor SDK 自动获取，可在此设置默认 Cursor 分析模型。</p>
             <div id="modelList" class="list admin-list"></div>
           </section>
         </section>
@@ -390,6 +414,39 @@
     </div>
   </div>
 
+  <div id="thirdPartyModelBackdrop" class="session-backdrop" hidden>
+    <div class="session-modal analysis-settings-modal" role="dialog" aria-labelledby="thirdPartyFormTitle">
+      <div class="session-modal-header">
+        <div>
+          <h3 id="thirdPartyFormTitle">添加第三方模型</h3>
+          <p id="thirdPartyFormSubtitle">配置 OpenAI 兼容或 AI Gateway 接入信息</p>
+        </div>
+        <button id="closeThirdPartyModelModal" type="button">关闭</button>
+      </div>
+      <div class="analysis-settings-body admin-modal-body third-party-model-form">
+        <input type="hidden" id="thirdPartyEditingId" value="">
+        <label for="tpFormName">显示名称</label>
+        <input id="tpFormName" type="text" autocomplete="off" placeholder="例如 DeepSeek Flash">
+        <label for="tpFormProvider">提供方</label>
+        <select id="tpFormProvider">
+          <option value="openai-compatible">OpenAI 兼容（OpenRouter / LiteLLM / 自建等）</option>
+          <option value="ai-gateway">Vercel AI Gateway</option>
+        </select>
+        <label for="tpFormBaseUrl">Base URL</label>
+        <input id="tpFormBaseUrl" type="text" autocomplete="off" placeholder="https://openrouter.ai/api/v1">
+        <p class="field-hint">AI Gateway 可留空；OpenAI 兼容必填。</p>
+        <label for="tpFormModelName">模型 ID</label>
+        <input id="tpFormModelName" type="text" autocomplete="off" placeholder="deepseek/deepseek-v4-flash">
+        <label for="tpFormApiKey">API Key</label>
+        <div class="secret-input-row">
+          <input id="tpFormApiKey" type="password" autocomplete="off" placeholder="新增时必填；编辑时留空表示不修改">
+          <button type="button" id="toggleTpFormApiKey" class="secondary">显示</button>
+        </div>
+        <button type="button" id="submitThirdPartyModel" class="primary full">添加模型</button>
+      </div>
+    </div>
+  </div>
+
   <div id="confirmBackdrop" class="session-backdrop" hidden>
     <div class="session-modal admin-confirm-modal" role="dialog" aria-labelledby="confirmTitle" aria-describedby="confirmMessage">
       <button id="closeConfirm" type="button" class="modal-close-btn" aria-label="关闭">×</button>
@@ -407,6 +464,6 @@
     </div>
   </div>
 
-  <script src="/static/admin.js?v=20260602-feishu-stream"></script>
+  <script src="/static/admin.js?v=20260528-admin-models-ui"></script>
 </body>
 </html>

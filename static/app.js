@@ -87,11 +87,11 @@ const state = {
   activeChatSession: null,
   chatSessions: [],
   allChatSessions: [],
-  syncedRepoKeyBySession: {},
   selectedTemplateId: null,
   selectedAnalysisType: null,
   chatPanelVisible: false,
   activeAnalyses: {},
+  modelProvider: "cursor",
 };
 
 const $ = (id) => document.getElementById(id);
@@ -372,7 +372,6 @@ function resetChatState() {
   state.activeChatSession = null;
   state.chatSessions = [];
   state.allChatSessions = [];
-  state.syncedRepoKeyBySession = {};
   state.selectedTemplateId = null;
   state.selectedAnalysisType = null;
   clearAttachments({ keepStatus: true });
@@ -386,17 +385,123 @@ function optionList(items, labelFn) {
   return items.map((item) => `<option value="${item.id}">${escapeHtml(labelFn(item))}</option>`).join("");
 }
 
+function normalizeThirdPartyModel(model) {
+  return {
+    ...model,
+    enabled: Boolean(model.enabled),
+    is_default: Boolean(model.is_default),
+    configured: Boolean(model.configured),
+  };
+}
+
+function applyModelsPayload(modelsPayload) {
+  state.modelsPayload = modelsPayload;
+  state.models = Array.isArray(modelsPayload) ? modelsPayload : (modelsPayload?.models || []);
+  const thirdParty = !Array.isArray(modelsPayload) ? (modelsPayload?.third_party || {}) : {};
+  state.thirdPartyModels = (thirdParty.models || []).map(normalizeThirdPartyModel);
+  state.thirdPartyEnabled = Boolean(thirdParty.enabled);
+  state.thirdPartyDefaultId = thirdParty.default_model_id ?? null;
+  state.thirdPartyActive = state.thirdPartyEnabled
+    && state.thirdPartyModels.some((model) => model.enabled && model.configured);
+  if (!canShowModelProviderSwitch() && state.modelProvider === "third_party") {
+    state.modelProvider = "cursor";
+  }
+}
+
+function canShowModelProviderSwitch() {
+  return state.thirdPartyEnabled
+    && state.thirdPartyModels.some((model) => model.enabled && model.configured);
+}
+
+function getAnalysisModelProvider() {
+  if (!canShowModelProviderSwitch()) return "cursor";
+  return state.modelProvider === "third_party" ? "third_party" : "cursor";
+}
+
+function renderModelSelectForProvider(provider, preferredModelId = null) {
+  const modelSelect = $("analysisModel");
+  if (!modelSelect) return;
+
+  if (provider === "third_party") {
+    const models = state.thirdPartyModels.filter((model) => model.enabled && model.configured);
+    modelSelect.disabled = !models.length;
+    modelSelect.innerHTML = models.length
+      ? models.map((model) => {
+        const suffix = model.is_default ? "（默认）" : "";
+        return `<option value="${model.id}">${escapeHtml(model.name)}${suffix}</option>`;
+      }).join("")
+      : `<option value="">未配置第三方模型</option>`;
+    const pick = preferredModelId && models.some((model) => model.id === preferredModelId)
+      ? preferredModelId
+      : (state.thirdPartyDefaultId || models[0]?.id);
+    if (pick) modelSelect.value = String(pick);
+    return;
+  }
+
+  const cursorModels = state.models.filter((model) => model.enabled);
+  modelSelect.disabled = !cursorModels.length;
+  modelSelect.innerHTML = cursorModels.length
+    ? optionList(
+      cursorModels,
+      (model) => {
+        const tags = [];
+        if (model.is_default) tags.push("默认");
+        if (model.recommended) tags.push("推荐");
+        const suffix = tags.length ? `（${tags.join(" · ")}）` : "";
+        return `${model.name}${suffix}`;
+      },
+    )
+    : `<option value="">暂无 Cursor 模型</option>`;
+  const pick = preferredModelId && cursorModels.some((model) => model.id === preferredModelId)
+    ? preferredModelId
+    : cursorModels.find((model) => model.is_default)?.id ?? cursorModels[0]?.id;
+  if (pick) modelSelect.value = String(pick);
+}
+
+function setAnalysisModelProvider(provider, options = {}) {
+  const next = provider === "third_party" && canShowModelProviderSwitch() ? "third_party" : "cursor";
+  state.modelProvider = next;
+
+  const switchEl = $("modelProviderSwitch");
+  if (switchEl) {
+    switchEl.hidden = !canShowModelProviderSwitch();
+    switchEl.querySelectorAll(".model-provider-btn").forEach((btn) => {
+      const active = btn.dataset.provider === next;
+      btn.classList.toggle("is-active", active);
+      btn.setAttribute("aria-pressed", active ? "true" : "false");
+    });
+  }
+
+  const label = $("analysisModelLabel");
+  if (label) {
+    label.textContent = next === "third_party" ? "第三方模型" : "Cursor 模型";
+  }
+
+  renderModelSelectForProvider(next, options.preferredModelId ?? null);
+}
+
+function renderModelProviderUI() {
+  setAnalysisModelProvider(state.modelProvider || "cursor");
+}
+
 async function loadAll() {
-  const [projects, repos, models] = await Promise.all([
+  const [projects, repos, modelsPayload] = await Promise.all([
     api("/api/projects?scope=user"),
     api("/api/repos?scope=user"),
     api("/api/models"),
   ]);
   state.projects = projects;
   state.repos = repos;
-  state.models = models;
+  applyModelsPayload(modelsPayload);
   render();
   await initChatSessionForProject();
+}
+
+async function refreshModelsForClient() {
+  const modelsPayload = await api("/api/models");
+  applyModelsPayload(modelsPayload);
+  renderModelProviderUI();
+  renderChatProjectContext();
 }
 
 function getCurrentProjectId() {
@@ -413,8 +518,12 @@ function getSelectedRepoIds() {
 }
 
 function captureSessionSettings() {
+  const provider = getAnalysisModelProvider();
+  const modelId = Number($("analysisModel").value) || null;
   return {
-    model_id: $("analysisModel").value ? Number($("analysisModel").value) : null,
+    model_provider: provider,
+    model_id: provider === "cursor" ? modelId : null,
+    third_party_model_id: provider === "third_party" ? modelId : null,
     output_mode: $("outputMode").value,
     analysis_scope: $("analysisScope")?.value?.trim() || "",
     repo_ids: getSelectedRepoIds(),
@@ -426,7 +535,14 @@ function applySessionSettings(session) {
     $("analysisProject").value = String(session.project_id);
     renderAnalysisRepos();
   }
-  if (session.model_id) $("analysisModel").value = String(session.model_id);
+  const provider = session.model_provider === "third_party" && canShowModelProviderSwitch()
+    ? "third_party"
+    : "cursor";
+  state.modelProvider = provider;
+  const preferredModelId = provider === "third_party"
+    ? (session.third_party_model_id || state.thirdPartyDefaultId)
+    : session.model_id;
+  setAnalysisModelProvider(provider, { preferredModelId });
   if (session.output_mode) $("outputMode").value = session.output_mode;
   if ($("analysisScope")) $("analysisScope").value = session.analysis_scope || "";
   const repoIds = session.repo_ids ? session.repo_ids.split(",").map(Number).filter(Boolean) : [];
@@ -475,11 +591,19 @@ function renderChatProjectContext() {
   const repoNames = repoIds
     .map((repoId) => state.repos.find((repo) => repo.id === repoId)?.name)
     .filter(Boolean);
-  const model = state.models.find((item) => item.id === session.model_id);
+  const provider = session.model_provider === "third_party" ? "第三方" : "Cursor";
   const modelSelect = $("analysisModel");
-  const modelName = model?.name
-    || modelSelect?.options[modelSelect.selectedIndex]?.textContent
-    || "默认模型";
+  let modelName = modelSelect?.options[modelSelect.selectedIndex]?.textContent?.trim() || "";
+  if (!modelName && session.model_provider === "third_party" && session.third_party_model_id) {
+    const thirdParty = state.thirdPartyModels.find((item) => item.id === Number(session.third_party_model_id));
+    modelName = thirdParty?.name || "第三方模型";
+  }
+  if (!modelName && session.model_id) {
+    const cursorModel = state.models.find((item) => item.id === session.model_id);
+    modelName = cursorModel?.name || "Cursor 模型";
+  }
+  if (!modelName) modelName = "默认模型";
+  modelName = `${provider} · ${modelName}`;
   const outputMode = session.output_mode === "developer" ? "研发模式" : "非研发模式";
   const scope = session.analysis_scope?.trim();
 
@@ -825,16 +949,7 @@ function applyQuestionTemplate(templateId) {
 
 function renderSelectors() {
   $("analysisProject").innerHTML = optionList(state.projects, (project) => project.name);
-  $("analysisModel").innerHTML = optionList(
-    state.models.filter((model) => model.enabled),
-    (model) => {
-      const tags = [];
-      if (model.is_default) tags.push("默认");
-      if (model.recommended) tags.push("推荐分析");
-      const suffix = tags.length ? `（${tags.join(" · ")}）` : "";
-      return `${model.name}${suffix}`;
-    },
-  );
+  renderModelProviderUI();
   renderAnalysisRepos();
 }
 
@@ -1236,7 +1351,6 @@ async function runAnalysis(options = {}) {
   const project = state.projects.find((item) => item.id === Number($("analysisProject").value));
   const meta = `${project?.name || "未选择项目"} · 自动判断分析方式${currentAttachmentNames ? ` · 附件：${currentAttachmentNames}` : ""}`;
   const userMessage = question || `分析附件：${currentAttachmentNames}`;
-  const conversationContext = conversationContextForNextTurn();
   appendMessage("user", userMessage, meta);
   rememberTurn("user", userMessage, meta);
   await syncSessionSettings();
@@ -1252,27 +1366,26 @@ async function runAnalysis(options = {}) {
   const sendButtons = [$("runAnalysis"), $("newRunAnalysis")].filter(Boolean);
   sendButtons.forEach((button) => { button.disabled = true; });
   try {
-    const repoKey = [...repoIds].sort((a, b) => a - b).join(",");
-    const alreadySynced = state.syncedRepoKeyBySession[analysisSessionId] === repoKey;
-    const statusText = alreadySynced ? "继续分析..." : "准备分析...";
+    const statusText = "准备分析...";
     const analysisState = state.activeAnalyses[analysisSessionId];
     if (state.chatSessionId === analysisSessionId && analysisState?.pendingBody) {
       renderMessageBody(analysisState.pendingBody, statusText);
     }
     setAnalysisStatus(statusText);
+    const sessionSettings = captureSessionSettings();
     const task = await streamAnalysis({
       project_id: Number($("analysisProject").value),
       repo_ids: repoIds,
-      model_id: $("analysisModel").value ? Number($("analysisModel").value) : null,
+      model_provider: sessionSettings.model_provider,
+      model_id: sessionSettings.model_id,
+      third_party_model_id: sessionSettings.third_party_model_id,
       analysis_type: state.selectedAnalysisType || undefined,
       analysis_scope: $("analysisScope")?.value?.trim() || "",
       question,
       log_text: currentAttachmentText,
       attachment_images: currentAttachmentImages,
-      conversation_context: conversationContext,
       chat_session_id: analysisSessionId,
       output_mode: $("outputMode").value,
-      skip_sync: alreadySynced,
     }, {
       onStatus: (message) => {
         if (message) setAnalysisStatus(message);
@@ -1309,7 +1422,6 @@ async function runAnalysis(options = {}) {
       rememberTurn("assistant", assistantText, "Anna Analysis");
     }
     await persistChatMessage("assistant", assistantText, "Anna Analysis", analysisSessionId);
-    state.syncedRepoKeyBySession[analysisSessionId] = repoKey;
     setAnalysisStatus("分析完成");
     state.selectedTemplateId = null;
     state.selectedAnalysisType = null;
@@ -1396,7 +1508,6 @@ function clearChat() {
   api(`/api/chat/sessions/${state.chatSessionId}/messages`, { method: "DELETE" })
     .then(() => {
       state.chatTurns = [];
-      delete state.syncedRepoKeyBySession[state.chatSessionId];
       renderWelcomeMessage();
       renderSessionSummary();
       setAnalysisStatus("对话已清空");
@@ -1416,8 +1527,16 @@ function escapeHtml(value) {
 $("analysisProject").addEventListener("change", () => {
   renderAnalysisRepos();
 });
+$("modelProviderSwitch")?.addEventListener("click", (event) => {
+  const button = event.target.closest?.("[data-provider]");
+  if (!button?.dataset?.provider) return;
+  setAnalysisModelProvider(button.dataset.provider);
+  if (state.activeChatSession) syncSessionSettings().catch(() => {});
+  renderChatProjectContext();
+});
 $("analysisModel").addEventListener("change", () => {
   if (state.activeChatSession) syncSessionSettings().catch(() => {});
+  renderChatProjectContext();
   renderSessionSummary();
 });
 $("analysisRepos").addEventListener("change", () => {

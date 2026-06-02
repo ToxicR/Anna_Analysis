@@ -187,6 +187,48 @@ export function initDb(): void {
   migrateAppUserLoginRecords();
   migrateFeishuIntegration();
   migrateAppUserWebLogin();
+  migrateThirdPartyModels();
+  migrateChatSessionThirdPartyModelId();
+  migrateChatSessionModelProvider();
+}
+
+function migrateChatSessionThirdPartyModelId(): void {
+  const columns = db.prepare("PRAGMA table_info(chat_sessions)").all() as Array<{ name: string }>;
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has("third_party_model_id")) {
+    db.exec("ALTER TABLE chat_sessions ADD COLUMN third_party_model_id INTEGER REFERENCES third_party_models(id)");
+  }
+}
+
+function migrateChatSessionModelProvider(): void {
+  const columns = db.prepare("PRAGMA table_info(chat_sessions)").all() as Array<{ name: string }>;
+  const names = new Set(columns.map((column) => column.name));
+  if (!names.has("model_provider")) {
+    db.exec("ALTER TABLE chat_sessions ADD COLUMN model_provider TEXT DEFAULT 'cursor'");
+    db.exec(`
+      UPDATE chat_sessions
+      SET model_provider = 'third_party'
+      WHERE third_party_model_id IS NOT NULL AND third_party_model_id > 0
+    `);
+  }
+}
+
+function migrateThirdPartyModels(): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS third_party_models (
+      id INTEGER PRIMARY KEY,
+      name VARCHAR(120) NOT NULL,
+      provider VARCHAR(40) NOT NULL DEFAULT 'openai-compatible',
+      base_url TEXT DEFAULT '',
+      api_key TEXT DEFAULT '',
+      model_name VARCHAR(160) NOT NULL DEFAULT '',
+      enabled BOOLEAN DEFAULT 1,
+      is_default BOOLEAN DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS ix_third_party_models_enabled ON third_party_models(enabled);
+  `);
 }
 
 function migrateAppUserWebLogin(): void {

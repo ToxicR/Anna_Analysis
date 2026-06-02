@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Anna Analysis</title>
   <link rel="icon" type="image/png" href="/static/assets/anna-logo.png">
-  <link rel="stylesheet" href="/static/styles.css?v=20260528-password-flow-fix5">
+  <link rel="stylesheet" href="/static/styles.css?v=20260528-model-provider-switch">
   <style>
     #appScreen:not([hidden]) .app-shell {
       display: grid;
@@ -109,8 +109,12 @@
               </label>
             </div>
             <div class="new-chat-toolbar-right">
+              <div id="modelProviderSwitch" class="model-provider-switch" hidden role="group" aria-label="分析引擎">
+                <button type="button" class="model-provider-btn is-active" data-provider="cursor">Cursor</button>
+                <button type="button" class="model-provider-btn" data-provider="third_party">第三方</button>
+              </div>
               <label class="new-chat-select-pill new-chat-model-pill">
-                <span class="new-chat-select-label">模型</span>
+                <span id="analysisModelLabel" class="new-chat-select-label">模型</span>
                 <select id="analysisModel" class="new-chat-select new-chat-model-select"></select>
               </label>
               <button id="newRunAnalysis" type="button" class="new-chat-send" title="发送分析" aria-label="发送分析">

@@ -11,10 +11,14 @@ ROOT = Path(__file__).resolve().parent.parent
 REMOTE = "/opt/Anna_Analysis"
 
 FILES = [
+    "package.json",
+    "package-lock.json",
     "src/db.ts",
     "src/types.ts",
     "src/server.ts",
     "src/services/analysis-runner.ts",
+    "src/services/cursor-runtime.ts",
+    "src/services/third-party-models.ts",
     "src/services/app-users.ts",
     "src/services/ai.ts",
     "static/app.js",
@@ -63,7 +67,7 @@ sftp.close()
 
 cmd = (
     "source /opt/rh/gcc-toolset-12/enable && "
-    "cd /opt/Anna_Analysis && npm run build && "
+    "cd /opt/Anna_Analysis && npm install && npm run build && "
     "systemctl restart anna-analysis && sleep 2 && systemctl is-active anna-analysis"
 )
 _, stdout, stderr = client.exec_command(cmd, timeout=180)
