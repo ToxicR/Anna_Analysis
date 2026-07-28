@@ -4,6 +4,15 @@ import type { FeishuInteractiveCard } from "./cards.js";
 
 const FEISHU_API_BASE = "https://open.feishu.cn/open-apis";
 
+interface FeishuBotIdentityCache {
+  appId: string;
+  openId: string;
+  appName: string;
+  expiresAt: number;
+}
+
+let botIdentityCache: FeishuBotIdentityCache | null = null;
+
 interface TenantTokenCache {
   token: string;
   expiresAt: number;
@@ -54,6 +63,48 @@ export async function getFeishuTenantAccessToken(): Promise<string> {
   return tenantTokenCache.token;
 }
 
+export interface FeishuBotIdentity {
+  appId: string;
+  openId: string;
+  appName: string;
+}
+
+/** 缓存机器人名称/open_id，用于群聊 @ 检测。 */
+export async function getFeishuBotIdentity(): Promise<FeishuBotIdentity> {
+  const appId = getFeishuAppIdRaw();
+  const now = Date.now();
+  if (botIdentityCache && botIdentityCache.appId === appId && botIdentityCache.expiresAt > now) {
+    return {
+      appId: botIdentityCache.appId,
+      openId: botIdentityCache.openId,
+      appName: botIdentityCache.appName,
+    };
+  }
+
+  let openId = "";
+  let appName = "";
+  try {
+    const token = await getFeishuTenantAccessToken();
+    const data = await fetchJson<{
+      bot?: { open_id?: string; app_name?: string };
+    }>(`${FEISHU_API_BASE}/bot/v3/info`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    openId = data.bot?.open_id?.trim() ?? "";
+    appName = data.bot?.app_name?.trim() ?? "";
+  } catch {
+    // 拉取失败时仍可用 appName 为空 + 后续 mentions.name 匹配降级。
+  }
+
+  botIdentityCache = {
+    appId,
+    openId,
+    appName,
+    expiresAt: now + 60 * 60 * 1000,
+  };
+  return { appId, openId, appName };
+}
+
 export function splitFeishuText(text: string, maxLen = 3500): string[] {
   const normalized = text.trim();
   if (!normalized) return [];
@@ -93,6 +144,19 @@ export async function sendFeishuTextToChat(chatId: string, text: string): Promis
   }
 }
 
+export async function sendFeishuTextToOpenId(openId: string, text: string): Promise<void> {
+  const trimmed = openId.trim();
+  if (!trimmed) throw new Error("缺少 open_id");
+  const chunks = splitFeishuText(text);
+  for (const chunk of chunks) {
+    await sendFeishuMessageRequest("/im/v1/messages?receive_id_type=open_id", {
+      receive_id: trimmed,
+      msg_type: "text",
+      content: JSON.stringify({ text: chunk }),
+    });
+  }
+}
+
 export async function replyFeishuText(messageId: string, text: string): Promise<void> {
   const chunks = splitFeishuText(text);
   for (const chunk of chunks) {
@@ -115,6 +179,16 @@ export async function deliverFeishuText(input: { chatId: string; messageId?: str
 export async function sendFeishuInteractiveCardToChat(chatId: string, card: FeishuInteractiveCard): Promise<void> {
   await sendFeishuMessageRequest("/im/v1/messages?receive_id_type=chat_id", {
     receive_id: chatId,
+    msg_type: "interactive",
+    content: JSON.stringify(card),
+  });
+}
+
+export async function sendFeishuInteractiveCardToOpenId(openId: string, card: FeishuInteractiveCard): Promise<void> {
+  const trimmed = openId.trim();
+  if (!trimmed) throw new Error("缺少 open_id");
+  await sendFeishuMessageRequest("/im/v1/messages?receive_id_type=open_id", {
+    receive_id: trimmed,
     msg_type: "interactive",
     content: JSON.stringify(card),
   });
@@ -179,4 +253,54 @@ export async function fetchFeishuChatInfo(chatId: string): Promise<FeishuChatInf
     description: payload.description?.trim() ?? "",
     chat_type: chatMode === "p2p" ? "p2p" : "group",
   };
+}
+
+export interface FeishuMessageSummary {
+  message_id: string;
+  message_type: string;
+  content: string;
+}
+
+/**
+ * Fetch a single message by id (used to resolve the file referenced by a quoted reply).
+ * Returns null when the message can't be read (e.g. missing scope) so callers can fall back gracefully.
+ */
+export async function fetchFeishuMessageById(
+  messageId: string,
+  log?: { warn: (obj: Record<string, unknown>, msg: string) => void },
+): Promise<FeishuMessageSummary | null> {
+  const trimmed = messageId.trim();
+  if (!trimmed) return null;
+  try {
+    const token = await getFeishuTenantAccessToken();
+    const data = await fetchJson<{
+      code?: number;
+      msg?: string;
+      data?: {
+        items?: Array<{
+          message_id?: string;
+          msg_type?: string;
+          body?: { content?: string };
+        }>;
+      };
+    }>(`${FEISHU_API_BASE}/im/v1/messages/${encodeURIComponent(trimmed)}`, {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    const item = data.data?.items?.[0];
+    if (!item) {
+      log?.warn({ messageId: trimmed, code: data.code, msg: data.msg }, "feishu parent message fetch returned no items");
+      return null;
+    }
+    return {
+      message_id: item.message_id?.trim() || trimmed,
+      message_type: item.msg_type?.trim() || "",
+      content: item.body?.content ?? "",
+    };
+  } catch (error) {
+    log?.warn(
+      { messageId: trimmed, err: error instanceof Error ? error.message : String(error) },
+      "feishu parent message fetch failed (check im:message.group_msg permission for group file messages)",
+    );
+    return null;
+  }
 }

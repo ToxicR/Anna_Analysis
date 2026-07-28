@@ -88,9 +88,10 @@ function writeWorkspaceManifest(workspaceRoot: string, repos: GitRepo[]): void {
       const slot = repoWorkspaceSlot(repo);
       return `- \`${slot}/\` — ${repo.name}（分支 ${repo.branch || "main"}）`;
     }),
-    "- `uploads/` — 用户上传的日志、截图等附件（分析前请优先读取）",
+    "- `uploads/` — 用户上传的日志、截图等附件（按子目录区分不同会话）",
     "",
     "## 分析要求",
+    "- 只读取本轮分析明确指定的日志/附件路径；不要翻阅 `uploads/` 下其他会话目录的历史日志。",
     "- 在给出结论前，必须搜索并打开仓库中的实际文件。",
     "- 跨 Android / C++ 问题时，请同时检查相关子目录。",
   ];

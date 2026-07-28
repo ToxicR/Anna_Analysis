@@ -3,11 +3,25 @@ import type { FeishuAvailableProject } from "../../types.js";
 export const FEISHU_CARD_ACTION_PICK_PROJECT = "pick_project";
 export const FEISHU_CARD_ACTION_RUN_COMMAND = "run_command";
 
+export interface FeishuPickAttachment {
+  resource_key: string;
+  resource_type: "file" | "image";
+  file_name?: string;
+}
+
+export type FeishuProjectPickIntent = "analyze" | "new_session";
+
 export interface FeishuProjectPickAction {
   action: typeof FEISHU_CARD_ACTION_PICK_PROJECT;
   project_id: number;
   question: string;
   chat_type: string;
+  /** analyze：选项目后开始分析；new_session：选项目后新建会话。 */
+  intent?: FeishuProjectPickIntent;
+  /** 上传文件后弹出选择卡时，把附件与消息 id 带在卡里，选完项目才能下载分析该文件。 */
+  message_id?: string;
+  parent_message_id?: string;
+  attachments?: FeishuPickAttachment[];
 }
 
 export type FeishuRunCommandName = "shared" | "personal" | "new_session" | "select_project";
@@ -65,10 +79,26 @@ function createHelpCardInstanceId(): string {
   return `h${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
 
+function sanitizePickAttachments(attachments?: FeishuPickAttachment[]): FeishuPickAttachment[] | undefined {
+  if (!attachments?.length) return undefined;
+  const cleaned = attachments
+    .filter((item) => item?.resource_key && (item.resource_type === "file" || item.resource_type === "image"))
+    .map((item) => ({
+      resource_key: item.resource_key,
+      resource_type: item.resource_type,
+      ...(item.file_name ? { file_name: item.file_name } : {}),
+    }));
+  return cleaned.length ? cleaned : undefined;
+}
+
 function buildPickProjectValue(input: {
   projectId: number;
   question: string;
   chatType: string;
+  intent?: FeishuProjectPickIntent;
+  messageId?: string;
+  parentMessageId?: string;
+  attachments?: FeishuPickAttachment[];
   cardState?: FeishuHelpCardState;
 }): FeishuProjectPickAction & { card_state?: FeishuHelpCardState } {
   const value: FeishuProjectPickAction & { card_state?: FeishuHelpCardState } = {
@@ -77,6 +107,11 @@ function buildPickProjectValue(input: {
     question: input.question,
     chat_type: input.chatType,
   };
+  if (input.intent) value.intent = input.intent;
+  if (input.messageId) value.message_id = input.messageId;
+  if (input.parentMessageId) value.parent_message_id = input.parentMessageId;
+  const attachments = sanitizePickAttachments(input.attachments);
+  if (attachments) value.attachments = attachments;
   const cardState = normalizeHelpCardState(input.cardState);
   if (Object.keys(cardState).length) value.card_state = cardState;
   return value;
@@ -85,7 +120,11 @@ function buildPickProjectValue(input: {
 function buildProjectButton(project: FeishuAvailableProject, input: {
   question: string;
   chatType: string;
+  intent?: FeishuProjectPickIntent;
   selectedProjectId?: number;
+  messageId?: string;
+  parentMessageId?: string;
+  attachments?: FeishuPickAttachment[];
 }): Record<string, unknown> {
   const selected = input.selectedProjectId === project.id;
   const label = selected ? `✓ ${truncateText(project.name, MAX_BUTTON_LABEL - 2)}` : truncateText(project.name, MAX_BUTTON_LABEL);
@@ -98,6 +137,10 @@ function buildProjectButton(project: FeishuAvailableProject, input: {
       projectId: project.id,
       question: input.question,
       chatType: input.chatType,
+      intent: input.intent,
+      messageId: input.messageId,
+      parentMessageId: input.parentMessageId,
+      attachments: input.attachments,
     }),
   };
 }
@@ -106,17 +149,25 @@ export function buildProjectPickerCard(input: {
   projects: FeishuAvailableProject[];
   question: string;
   chatType: string;
+  intent?: FeishuProjectPickIntent;
   selectedProjectId?: number;
+  messageId?: string;
+  parentMessageId?: string;
+  attachments?: FeishuPickAttachment[];
 }): FeishuInteractiveCard {
+  const isNewSession = input.intent === "new_session";
   const questionPreview = truncateText(input.question, MAX_QUESTION_PREVIEW);
+  const intro = isNewSession
+    ? "将清空当前会话上下文。请点击下方按钮选择要使用的项目："
+    : questionPreview
+      ? `你的问题：${questionPreview}\n\n请点击下方按钮选择要分析的项目：`
+      : "请点击下方按钮选择要分析的项目：";
   const elements: Array<Record<string, unknown>> = [
     {
       tag: "div",
       text: {
         tag: "plain_text",
-        content: questionPreview
-          ? `你的问题：${questionPreview}\n\n请点击下方按钮选择要分析的项目：`
-          : "请点击下方按钮选择要分析的项目：",
+        content: intro,
       },
     },
   ];
@@ -128,19 +179,30 @@ export function buildProjectPickerCard(input: {
       actions: row.map((project) => buildProjectButton(project, {
         question: input.question,
         chatType: input.chatType,
+        intent: input.intent,
         selectedProjectId: input.selectedProjectId,
+        messageId: input.messageId,
+        parentMessageId: input.parentMessageId,
+        attachments: input.attachments,
       })),
     });
   }
 
+  const hasAttachment = Boolean(input.attachments?.length || input.parentMessageId);
   elements.push({
     tag: "note",
     elements: [
       {
         tag: "plain_text",
-        content: input.selectedProjectId
-          ? "项目已选定，请继续发送问题"
-          : "也可手动输入：/项目3 你的问题",
+        content: isNewSession
+          ? (input.selectedProjectId
+            ? "项目已选定，请继续发送问题或上传日志"
+            : "选择项目后将开启新会话")
+          : input.selectedProjectId
+            ? "项目已选定，请继续发送问题"
+            : hasAttachment
+              ? "点击上方项目按钮，即可分析本次上传的文件"
+              : "也可手动输入：/项目3 你的问题",
       },
     ],
   });
@@ -149,7 +211,7 @@ export function buildProjectPickerCard(input: {
     config: { wide_screen_mode: true, update_multi: true },
     header: {
       template: "blue",
-      title: { tag: "plain_text", content: "请选择项目" },
+      title: { tag: "plain_text", content: isNewSession ? "新建会话 · 请选择项目" : "请选择项目" },
     },
     elements,
   };
@@ -360,6 +422,21 @@ export function buildHelpCard(input: {
   };
 }
 
+function parsePickAttachments(value: unknown): FeishuPickAttachment[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const result: FeishuPickAttachment[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const key = typeof record.resource_key === "string" ? record.resource_key.trim() : "";
+    const type = record.resource_type === "image" ? "image" : record.resource_type === "file" ? "file" : null;
+    if (!key || !type) continue;
+    const fileName = typeof record.file_name === "string" ? record.file_name : undefined;
+    result.push({ resource_key: key, resource_type: type, ...(fileName ? { file_name: fileName } : {}) });
+  }
+  return result.length ? result : undefined;
+}
+
 function parseCardActionRecord(value: unknown): Record<string, unknown> | null {
   let parsed: unknown = value;
   if (typeof value === "string") {
@@ -381,12 +458,24 @@ export function parseFeishuCardAction(value: unknown): FeishuCardAction | null {
   if (record.action === FEISHU_CARD_ACTION_PICK_PROJECT) {
     const projectId = Number(record.project_id);
     if (!Number.isInteger(projectId) || projectId <= 0) return null;
-    return {
+    const result: FeishuProjectPickAction = {
       action: FEISHU_CARD_ACTION_PICK_PROJECT,
       project_id: projectId,
       question: typeof record.question === "string" ? record.question : "",
       chat_type: chatType,
     };
+    if (typeof record.message_id === "string" && record.message_id.trim()) {
+      result.message_id = record.message_id.trim();
+    }
+    if (typeof record.parent_message_id === "string" && record.parent_message_id.trim()) {
+      result.parent_message_id = record.parent_message_id.trim();
+    }
+    const attachments = parsePickAttachments(record.attachments);
+    if (attachments) result.attachments = attachments;
+    if (record.intent === "new_session" || record.intent === "analyze") {
+      result.intent = record.intent;
+    }
+    return result;
   }
 
   if (record.action === FEISHU_CARD_ACTION_RUN_COMMAND) {

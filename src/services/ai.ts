@@ -6,7 +6,7 @@ import { isThirdPartyModelEnabled, isThirdPartyProvider, loadCursorSdk } from ".
 import { db, getSetting, setSetting } from "../db.js";
 import { DATA_DIR } from "../paths.js";
 import type { AIModel, GitRepo } from "../types.js";
-import { projectWorkspaceRoot } from "./workspace.js";
+import { projectWorkspaceRoot, repoWorkspaceSlot } from "./workspace.js";
 
 export interface AnalysisResult {
   text: string;
@@ -82,6 +82,7 @@ export async function analyzeWithModel(
   chatSessionId = "",
   attachmentImages: AttachmentImage[] = [],
   stream?: AnalysisStreamCallbacks,
+  focusDir?: string,
 ): Promise<AnalysisResult> {
   if (!model || !model.model_name) {
     const text = localAnalysis(question, analysisType, logText);
@@ -89,7 +90,7 @@ export async function analyzeWithModel(
     return { text };
   }
 
-  return analyzeWithCursor(model, question, logText, repos, chatSessionId, attachmentImages, stream);
+  return analyzeWithCursor(model, question, logText, repos, chatSessionId, attachmentImages, stream, focusDir);
 }
 
 function buildSdkUserMessage(question: string, logText: string, images: SDKImage[]): string | SDKUserMessage {
@@ -106,13 +107,18 @@ async function analyzeWithCursor(
   chatSessionId: string,
   attachmentImages: AttachmentImage[],
   stream?: AnalysisStreamCallbacks,
+  focusDir?: string,
 ): Promise<AnalysisResult> {
   const projectId = repos[0]?.project_id;
   if (!projectId) throw new Error("缺少项目信息，无法定位工作区");
 
   const workspacePath = projectWorkspaceRoot(projectId);
   const useCloud = shouldUseCloudRuntime();
-  const cwd = [workspacePath];
+  // 本地模式下，若指定了隔离目录，则把 cwd 收窄为「各仓库 + 该隔离目录」，
+  // 避免 Agent 看到（并误读）uploads/ 下其他会话累积的历史日志。
+  const cwd = !useCloud && focusDir && fs.existsSync(focusDir)
+    ? buildScopedLocalCwd(projectId, repos, focusDir)
+    : [workspacePath];
   const sdkImages = resolveSdkImages(useCloud, attachmentImages);
   const sdkMessage = buildSdkUserMessage(question, logText, sdkImages);
   const sessionKey = buildSessionKey(chatSessionId, model, repos, workspacePath, useCloud);
@@ -272,6 +278,20 @@ function writeServerLog(event: string, payload: Record<string, unknown>): void {
   } catch {
     // Logging must never break the analysis response path.
   }
+}
+
+/**
+ * Build a scoped local cwd = each repo dir + the isolated focus dir.
+ * Excludes the project root (and therefore the shared uploads/ tree), so the agent
+ * cannot read other sessions' accumulated logs while still having full repo access.
+ */
+function buildScopedLocalCwd(projectId: number, repos: GitRepo[], focusDir: string): string[] {
+  const workspaceRoot = projectWorkspaceRoot(projectId);
+  const repoDirs = repos
+    .map((repo) => repo.local_path?.trim() || path.join(workspaceRoot, repoWorkspaceSlot(repo)))
+    .filter((dir) => fs.existsSync(dir));
+  const roots = [...repoDirs, focusDir];
+  return roots.length ? roots : [workspaceRoot];
 }
 
 function localAgentOptions(cwd: string[]) {

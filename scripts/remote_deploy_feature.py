@@ -17,6 +17,7 @@ FILES = [
     "src/types.ts",
     "src/server.ts",
     "src/services/analysis-runner.ts",
+    "src/services/workspace.ts",
     "src/services/cursor-runtime.ts",
     "src/services/third-party-models.ts",
     "src/services/app-users.ts",

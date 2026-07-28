@@ -1,5 +1,5 @@
 import type { FastifyReply } from "fastify";
-import { getFeishuVerificationTokenRaw } from "./config.js";
+import { FEISHU_BOT_MENU_EVENT_NEW_SESSION, getFeishuVerificationTokenRaw } from "./config.js";
 import { parseFeishuMessage, stripBotMention, type ParsedFeishuCommand } from "./commands.js";
 import { resolveAvailableProjects } from "./access.js";
 import { getFeishuUser } from "./users.js";
@@ -22,6 +22,7 @@ import {
   ensureFeishuSessionLinkForIncoming,
   getFeishuSessionLink,
   resetFeishuSession,
+  resolveFeishuPersonalChatIdForUser,
   resolveFeishuSessionContext,
 } from "./sessions.js";
 import { appendFeishuChatMessage } from "./chat-store.js";
@@ -44,6 +45,18 @@ export interface FeishuWebhookEvent {
       chat_type?: string;
       message_type?: string;
       content?: string;
+      parent_id?: string;
+      root_id?: string;
+      mentions?: Array<{
+        key?: string;
+        name?: string;
+        tenant_key?: string;
+        id?: {
+          open_id?: string;
+          union_id?: string;
+          user_id?: string;
+        };
+      }>;
     };
     sender?: {
       sender_id?: {
@@ -54,7 +67,15 @@ export interface FeishuWebhookEvent {
     operator?: {
       open_id?: string;
       union_id?: string;
+      operator_name?: string;
+      operator_id?: {
+        open_id?: string;
+        union_id?: string;
+        user_id?: string;
+      };
     };
+    event_key?: string;
+    timestamp?: number;
     action?: {
       value?: unknown;
       tag?: string;
@@ -80,6 +101,66 @@ export function verifyFeishuEventToken(body: FeishuWebhookEvent): boolean {
   return token === configured;
 }
 
+export interface FeishuBotMenuHandleResult {
+  replyText?: string;
+  replyCard?: FeishuInteractiveCard;
+  chatId?: string;
+  openId?: string;
+}
+
+function extractFeishuOperatorOpenId(body: FeishuWebhookEvent): string {
+  const operator = body.event?.operator;
+  return operator?.operator_id?.open_id?.trim()
+    || operator?.open_id?.trim()
+    || "";
+}
+
+/** 私聊输入框上方「新建会话」菜单点击（application.bot.menu_v6）。 */
+export function handleFeishuBotMenuEvent(body: FeishuWebhookEvent): FeishuBotMenuHandleResult {
+  const eventKey = body.event?.event_key?.trim() ?? "";
+  if (eventKey !== FEISHU_BOT_MENU_EVENT_NEW_SESSION) {
+    return { replyText: `未识别的菜单操作：${eventKey || "（空）"}` };
+  }
+
+  const openId = extractFeishuOperatorOpenId(body);
+  if (!openId) {
+    return { replyText: "无法识别操作用户。" };
+  }
+
+  const binding = getFeishuUser(openId);
+  if (!binding || !binding.enabled) {
+    return {
+      openId,
+      replyText: "你的飞书账号尚未绑定系统用户，请联系管理员在管理后台完成绑定。",
+    };
+  }
+
+  const chatId = resolveFeishuPersonalChatIdForUser(openId, binding.app_user_id);
+  const projects = resolveAvailableProjects({
+    chatId: chatId ?? "",
+    appUserId: binding.app_user_id,
+    chatType: "p2p",
+  });
+  if (!projects.length) {
+    return {
+      openId,
+      chatId: chatId ?? undefined,
+      replyText: "当前没有可用项目，无法新建会话。请联系管理员分配项目权限。",
+    };
+  }
+
+  return {
+    chatId: chatId ?? undefined,
+    openId,
+    replyCard: buildProjectPickerCard({
+      projects,
+      question: "",
+      chatType: "p2p",
+      intent: "new_session",
+    }),
+  };
+}
+
 export interface FeishuMessageHandleResult {
   replyText?: string;
   replyCard?: FeishuInteractiveCard;
@@ -96,7 +177,18 @@ export interface FeishuMessageHandleResult {
     mode: "personal" | "shared";
     chatType?: string;
     messageId?: string;
+    parentMessageId?: string;
     attachments?: FeishuIncomingAttachment[];
+  };
+  /** Download and save attachments before replying (e.g. file-only upload). */
+  stageAttachments?: {
+    projectId: number;
+    sessionId: string;
+    messageId: string;
+    openId: string;
+    mode: "personal" | "shared";
+    attachments: FeishuIncomingAttachment[];
+    parentMessageId?: string;
   };
 }
 
@@ -115,6 +207,8 @@ export function handleFeishuIncomingMessage(body: FeishuWebhookEvent): FeishuMes
   const command = parseFeishuMessage(text);
   const attachments = extractFeishuMessageAttachments(message?.message_type, message?.content);
   const messageId = message?.message_id?.trim() ?? "";
+  // 引用回复（用户回复某条文件消息）时，父消息 id 用于解析被引用的附件。
+  const parentMessageId = message?.parent_id?.trim() || message?.root_id?.trim() || "";
 
   if (command.name === "help") {
     const binding = getFeishuUser(openId);
@@ -149,10 +243,6 @@ export function handleFeishuIncomingMessage(body: FeishuWebhookEvent): FeishuMes
       replyCardAsNewMessage: true,
     };
   }
-  if (!question && attachments.length) {
-    return { replyText: "已收到附件，但无法生成分析问题，请补充说明或重新发送。" };
-  }
-
   const projects = resolveAvailableProjects({ chatId, appUserId: binding.app_user_id, chatType });
   if (!projects.length) {
     return { replyText: "当前没有可用项目。请确认群绑定与用户权限，或联系管理员。" };
@@ -173,16 +263,56 @@ export function handleFeishuIncomingMessage(body: FeishuWebhookEvent): FeishuMes
     projectId = projects[0]!.id;
   }
   if (!projectId) {
+    const attachmentNames = attachments.map((item) => item.file_name?.trim() || "附件").join("、");
     return {
+      replyText: attachments.length
+        ? `已收到附件（${attachmentNames}），请先点击下方卡片选择项目，再发送分析问题。`
+        : undefined,
       replyCard: buildProjectPickerCard({
         projects,
         question,
         chatType,
+        // 关键：项目选择卡必须携带附件与消息 id，否则选完项目后文件就丢了。
+        messageId,
+        attachments,
+        parentMessageId,
       }),
     };
   }
 
-  return enqueueFeishuAnalysis({
+  const mode = chatType === "p2p" ? "personal" : resolveFeishuSessionContext({ chatId, openId }).mode;
+  const { link } = ensureFeishuSessionLinkForIncoming({
+    chatId,
+    openId,
+    mode,
+    appUserId: binding.app_user_id,
+    projectId,
+    sharedStartedByOpenId: mode === "shared" ? openId : undefined,
+  });
+
+  const stageAttachments = attachments.length && messageId
+    ? {
+        projectId,
+        sessionId: link.session_id,
+        messageId,
+        openId,
+        mode,
+        attachments,
+        parentMessageId: parentMessageId || undefined,
+      }
+    : undefined;
+
+  if (!question && attachments.length) {
+    const names = attachments.map((item) => item.file_name?.trim() || "附件").join("、");
+    return {
+      replyText: chatType === "p2p"
+        ? `已收到日志文件（${names}），请继续发送要分析的问题（例如：分析设备何时掉线）。`
+        : `已收到日志文件（${names}），请 @机器人 发送要分析的问题（例如：分析设备何时掉线）。`,
+      stageAttachments,
+    };
+  }
+
+  const enqueued = enqueueFeishuAnalysis({
     chatId,
     chatType,
     openId,
@@ -191,8 +321,13 @@ export function handleFeishuIncomingMessage(body: FeishuWebhookEvent): FeishuMes
     question,
     projects,
     attachments,
-    messageId: attachments.length ? messageId : undefined,
+    messageId,
+    parentMessageId,
   });
+  if (stageAttachments) {
+    enqueued.stageAttachments = stageAttachments;
+  }
+  return enqueued;
 }
 
 function enqueueFeishuAnalysis(input: {
@@ -205,6 +340,7 @@ function enqueueFeishuAnalysis(input: {
   projects: FeishuAvailableProject[];
   attachments?: FeishuIncomingAttachment[];
   messageId?: string;
+  parentMessageId?: string;
 }): FeishuMessageHandleResult {
   const {
     chatId,
@@ -216,6 +352,7 @@ function enqueueFeishuAnalysis(input: {
     projects,
     attachments = [],
     messageId,
+    parentMessageId,
   } = input;
 
   const mode = chatType === "p2p" ? "personal" : resolveFeishuSessionContext({ chatId, openId }).mode;
@@ -244,8 +381,9 @@ function enqueueFeishuAnalysis(input: {
       question,
       mode,
       chatType,
-      messageId: attachments.length ? messageId : undefined,
-      attachments: attachments.length ? attachments : undefined,
+    messageId: attachments.length || parentMessageId ? messageId : undefined,
+    parentMessageId: !attachments.length && parentMessageId ? parentMessageId : undefined,
+    attachments: attachments.length ? attachments : undefined,
     },
   };
 }
@@ -316,6 +454,29 @@ export function handleFeishuCardAction(body: FeishuWebhookEvent): FeishuMessageH
     return { replyText: `项目 ${pick.project_id} 不可用，请重新选择。` };
   }
 
+  if (pick.intent === "new_session") {
+    const mode = chatType === "p2p" ? "personal" : resolveFeishuSessionContext({ chatId, openId }).mode;
+    const link = resetFeishuSession({
+      chatId,
+      openId,
+      mode,
+      appUserId: binding.app_user_id,
+      projectId: project.id,
+    });
+    appendFeishuChatMessage(link.session_id, "user", "[卡片] 新建会话", openId);
+    appendFeishuChatMessage(link.session_id, "assistant", `已新建会话，当前项目：${project.name}`, "", JSON.stringify({ source: "card_new_session" }));
+    return {
+      replyText: `已新建会话，上下文已清空。\n当前项目：${project.name}`,
+      replyCardUpdate: buildProjectPickerCard({
+        projects,
+        question: "",
+        chatType,
+        intent: "new_session",
+        selectedProjectId: project.id,
+      }),
+    };
+  }
+
   const question = pick.question.trim() || "请分析当前问题。";
   return {
     ...enqueueFeishuAnalysis({
@@ -326,6 +487,10 @@ export function handleFeishuCardAction(body: FeishuWebhookEvent): FeishuMessageH
       projectId: project.id,
       question,
       projects,
+      // 选项目时把卡片携带的文件附件/消息 id 一并带上，确保选完项目能下载并分析该文件。
+      attachments: pick.attachments,
+      messageId: pick.message_id,
+      parentMessageId: pick.parent_message_id,
     }),
     replyCardUpdate: buildProjectPickerCard({
       projects,

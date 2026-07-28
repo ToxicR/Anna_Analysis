@@ -3,11 +3,14 @@ import { getFeishuSettings, saveFeishuSettings } from "./config.js";
 import { unwrapFeishuWebhookBody } from "./crypto.js";
 import { listFeishuUsers, upsertFeishuUser, deleteFeishuUser, provisionFeishuUser } from "./users.js";
 import { listFeishuChats, upsertFeishuChat, deleteFeishuChat } from "./chats.js";
-import { feishuWebhookAck, handleFeishuIncomingMessage, handleFeishuCardAction, buildFeishuCardCallbackResponse, verifyFeishuEventToken, type FeishuWebhookEvent } from "./webhook.js";
-import { deliverFeishuWebhookResult } from "./deliver.js";
+import { feishuWebhookAck, handleFeishuIncomingMessage, handleFeishuCardAction, handleFeishuBotMenuEvent, buildFeishuCardCallbackResponse, verifyFeishuEventToken, type FeishuWebhookEvent } from "./webhook.js";
+import { deliverFeishuWebhookResult, deliverFeishuBotMenuResult } from "./deliver.js";
+import { extractFeishuMessageAttachments } from "./files.js";
+import { cacheFeishuWebhookMessage } from "./message-cache.js";
 import { recordFeishuContactFromWebhook } from "./contacts-cache.js";
 import { invalidateFeishuDirectoryCache, listFeishuDirectoryUsers, listRecentFeishuDirectoryUsers } from "./directory.js";
-import { fetchFeishuChatInfo } from "./api.js";
+import { fetchFeishuChatInfo, getFeishuBotIdentity } from "./api.js";
+import { isFeishuGroupMessageAddressedToBot } from "./mentions.js";
 
 function badRequest(reply: FastifyReply, detail: string) {
   return reply.status(400).send({ detail });
@@ -35,13 +38,39 @@ export function registerFeishuRoutes(app: FastifyInstance, requireAdmin: (reques
       try {
         const openId = body.event?.sender?.sender_id?.open_id?.trim() ?? "";
         const unionId = body.event?.sender?.sender_id?.union_id?.trim() ?? "";
+        const chatType = body.event?.message?.chat_type?.trim() || "group";
+        const chatId = body.event?.message?.chat_id?.trim() ?? "";
+
+        if (chatType !== "p2p" && chatId) {
+          const bot = await getFeishuBotIdentity();
+          const addressedToBot = isFeishuGroupMessageAddressedToBot({
+            chatType,
+            mentions: body.event?.message?.mentions,
+            bot,
+          });
+          if (!addressedToBot) {
+            request.log.info({
+              chatId,
+              chatType,
+              openId,
+              mentionCount: body.event?.message?.mentions?.length ?? 0,
+            }, "feishu group message ignored (bot not mentioned)");
+            return feishuWebhookAck(reply, body);
+          }
+        }
+
         if (openId) recordFeishuContactFromWebhook(openId, unionId);
+        const msg = body.event?.message;
+        if (msg?.message_id) {
+          cacheFeishuWebhookMessage(msg.message_id, msg.message_type, msg.content);
+        }
         const result = handleFeishuIncomingMessage(body);
-        const chatId = body.event?.message?.chat_id;
         const messageId = body.event?.message?.message_id;
         request.log.info({
           chatId,
           eventType,
+          messageType: body.event?.message?.message_type,
+          hasAttachment: Boolean(extractFeishuMessageAttachments(body.event?.message?.message_type, body.event?.message?.content).length),
           remoteAddress: request.ip,
           openId: body.event?.sender?.sender_id?.open_id,
           hasAnalysis: Boolean(result.enqueueAnalysis),
@@ -84,6 +113,24 @@ export function registerFeishuRoutes(app: FastifyInstance, requireAdmin: (reques
       } catch (error) {
         request.log.error({ err: error }, "feishu card action handle failed");
         return reply.send(buildFeishuCardCallbackResponse("处理失败，请稍后重试。"));
+      }
+    } else if (eventType === "application.bot.menu_v6") {
+      try {
+        const openId = body.event?.operator?.operator_id?.open_id?.trim()
+          || body.event?.operator?.open_id?.trim()
+          || "";
+        const result = handleFeishuBotMenuEvent(body);
+        request.log.info({
+          eventType,
+          eventKey: body.event?.event_key,
+          openId,
+          remoteAddress: request.ip,
+        }, "feishu bot menu event");
+        void deliverFeishuBotMenuResult(request.log, result).catch((error) => {
+          request.log.error({ err: error, openId }, "feishu bot menu delivery failed");
+        });
+      } catch (error) {
+        request.log.error({ err: error }, "feishu bot menu handle failed");
       }
     } else if (eventType) {
       request.log.info({ eventType, remoteAddress: request.ip }, "feishu webhook ignored event");

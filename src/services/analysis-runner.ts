@@ -1,6 +1,6 @@
 import { db, normalizeRow, normalizeRows, nowIso } from "../db.js";
 import { inferAnalysisType, analyzeWithModel, type AnalysisResult, type AnalysisStreamCallbacks } from "./ai.js";
-import { isThirdPartyProvider, resolveEffectiveAnalysisModel } from "./cursor-runtime.js";
+import { isThirdPartyModelEnabled, isThirdPartyProvider, resolveEffectiveAnalysisModel } from "./cursor-runtime.js";
 import { validateReposForAnalysis } from "./code.js";
 import type { AIModel, GitRepo, Project } from "../types.js";
 
@@ -22,6 +22,8 @@ export interface RunAnalysisInput {
   feishu_chat_id?: string;
   feishu_open_id?: string;
   feishu_session_id?: string;
+  /** 飞书分析时本轮聚焦文件的隔离目录；提供时 Agent 仅能访问仓库与该目录。 */
+  feishu_focus_dir?: string;
 }
 
 function getProject(projectId: number): Project | undefined {
@@ -84,7 +86,11 @@ export async function runAnalysis(
     stream?.onStatus?.(warnings.map((issue) => issue.message).join("；"));
   }
 
-  const useThirdParty = payload.model_provider === "third_party";
+  // 调用方未显式指定 provider（如飞书）时，跟随后台全局「第三方模型」开关，
+  // 否则会无视后台设置、强制落到 Cursor 默认模型并扣 Cursor 用量。
+  const useThirdParty = payload.model_provider
+    ? payload.model_provider === "third_party"
+    : isThirdPartyModelEnabled();
   const cursorModel = !useThirdParty
     ? (payload.model_id ? getModel(payload.model_id) : getDefaultModel())
     : undefined;
@@ -107,6 +113,7 @@ export async function runAnalysis(
     chatSessionId,
     attachmentImages,
     stream,
+    payload.feishu_focus_dir?.trim() || undefined,
   );
 
   const source = payload.source ?? "web";

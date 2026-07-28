@@ -180,3 +180,29 @@ export function resolveFeishuSessionContext(input: {
   const link = getFeishuSessionLink(input.chatId, input.openId, mode);
   return { mode, link };
 }
+
+/** 私聊菜单等场景：从最近会话 link / 会话记录反查 chat_id（菜单事件体不含 chat_id）。 */
+export function resolveFeishuPersonalChatIdForUser(openId: string, appUserId?: number): string | null {
+  const trimmed = openId.trim();
+  if (!trimmed) return null;
+  const fromLink = db.prepare(`
+    SELECT chat_id FROM feishu_session_links
+    WHERE open_id = ? AND mode = 'personal'
+    ORDER BY updated_at DESC
+    LIMIT 1
+  `).get(trimmed) as { chat_id?: string } | undefined;
+  const linkChatId = fromLink?.chat_id?.trim();
+  if (linkChatId) return linkChatId;
+
+  if (appUserId && appUserId > 0) {
+    const fromSession = db.prepare(`
+      SELECT chat_id FROM feishu_chat_sessions
+      WHERE app_user_id = ? AND mode = 'personal' AND chat_id != ''
+      ORDER BY updated_at DESC
+      LIMIT 1
+    `).get(appUserId) as { chat_id?: string } | undefined;
+    const sessionChatId = fromSession?.chat_id?.trim();
+    if (sessionChatId) return sessionChatId;
+  }
+  return null;
+}

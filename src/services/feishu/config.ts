@@ -10,6 +10,9 @@ export const FEISHU_SETTING_KEYS = {
 
 export const FEISHU_WEBHOOK_PATH = "/api/feishu/webhook";
 
+/** 飞书开发者后台「机器人自定义菜单」里配置的事件 Key，需与菜单项一致。 */
+export const FEISHU_BOT_MENU_EVENT_NEW_SESSION = "new_session";
+
 export function getFeishuSettings(): FeishuSettingsPublic {
   const appId = getSetting(FEISHU_SETTING_KEYS.appId).trim();
   const appSecret = getSetting(FEISHU_SETTING_KEYS.appSecret).trim();

@@ -143,6 +143,15 @@
               <h2>飞书应用配置</h2>
             </div>
             <p class="panel-intro">飞书入口与 Web 入口分离：会话、消息走独立表，共用底层分析与项目权限。事件订阅 URL：<code id="feishuWebhookUrl">/api/feishu/webhook</code></p>
+            <details class="feishu-recent-details">
+              <summary>私聊底部「新建会话」菜单配置</summary>
+              <ol class="field-hint" style="margin: 0.5rem 0 0 1rem; padding: 0;">
+                <li>飞书开发者后台 → 应用 → 机器人 → 开启<strong>机器人自定义菜单</strong>（仅私聊有效，建议选「悬浮菜单」）。</li>
+                <li>添加菜单项：名称 <strong>新建会话</strong>，响应动作选 <strong>推送事件</strong>，事件 Key 填 <code>new_session</code>。</li>
+                <li>事件与回调 → 添加事件 <code>application.bot.menu_v6</code>（机器人自定义菜单事件）。</li>
+                <li>发布应用版本后，用户在私聊输入框上方点击即可清空上下文并新建会话。</li>
+              </ol>
+            </details>
             <div class="admin-form-grid admin-form-grid-compact">
               <div class="admin-form-block">
                 <label for="feishuAppId">App ID</label>

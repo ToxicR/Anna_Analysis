@@ -1,15 +1,68 @@
 import type { FastifyBaseLogger } from "fastify";
 import { getEnabledReposForProject, runAnalysis } from "../analysis-runner.js";
 import { userCanAccessProjectForFeishu } from "./access.js";
-import { deliverFeishuText, deliverFeishuInteractiveCard, sendFeishuTextToChat } from "./api.js";
+import {
+  deliverFeishuText,
+  deliverFeishuInteractiveCard,
+  sendFeishuInteractiveCardToChat,
+  sendFeishuInteractiveCardToOpenId,
+  sendFeishuTextToChat,
+  sendFeishuTextToOpenId,
+} from "./api.js";
 import { appendFeishuChatMessage, getFeishuChatSession } from "./chat-store.js";
-import { extractLogFilenameHint, feishuSessionHasUploads, prepareFeishuAttachmentsForAnalysis } from "./files.js";
+import {
+  extractLogFilenameHint,
+  feishuSessionHasUploads,
+  ingestFeishuIncomingAttachments,
+  prepareFeishuAttachmentsForAnalysis,
+  resolveFeishuAnalysisSessionKey,
+} from "./files.js";
 import { FeishuProgressReporter } from "./progress.js";
 import { FeishuStreamingAnalysisCard, formatFeishuAnalysisIntro } from "./streaming.js";
 import type { AnalysisStreamCallbacks } from "../ai.js";
-import type { FeishuMessageHandleResult } from "./webhook.js";
+import type { FeishuBotMenuHandleResult, FeishuMessageHandleResult } from "./webhook.js";
 
 const inFlightSessionIds = new Set<string>();
+
+function questionExpectsLogAnalysis(question: string): boolean {
+  return /日志|\.log\b|log-\d{6,8}|掉线|异常|报错|附件|分析.*文件/i.test(question);
+}
+
+function missingLogAttachmentMessage(job: NonNullable<FeishuMessageHandleResult["enqueueAnalysis"]>): string {
+  const isP2p = job.chatType === "p2p";
+  if (job.parentMessageId) {
+    if (isP2p) {
+      return [
+        "未能从引用消息中解析到日志文件。",
+        "常见原因：",
+        "· 飞书应用未开通「获取单聊、群组消息」(im:message:readonly) 权限，无法读取被引用的文件消息；",
+        "· 被引用的文件消息在机器人收到之前发送（机器人未缓存到该条消息）。",
+        "请任选其一：",
+        "1) 先发送 .log，等机器人确认收到后再发分析问题；",
+        "2) 将 .log 与问题写在同一条消息里发送。",
+      ].join("\n");
+    }
+    return [
+      "未能从引用消息中解析到日志文件。",
+      "请任选其一：",
+      "1) 发送 .log 时同时 @机器人，再发分析问题；",
+      "2) 将 .log 与问题写在同一条消息里并 @机器人；",
+      "3) 若仍失败，请让管理员为机器人开通「获取群组中所有消息」(im:message.group_msg) 权限。",
+    ].join("\n");
+  }
+  if (isP2p) {
+    return [
+      "未收到可分析的日志文件。",
+      "请先直接发送 .log 文件，再发送分析问题；",
+      "或将 .log 与问题放在同一条消息中发送（单聊无需 @机器人）。",
+    ].join("\n");
+  }
+  return [
+    "未收到可分析的日志文件。",
+    "请先 @机器人 发送 .log 文件（仅发文件也需 @机器人），再 @机器人 提问；",
+    "或将 .log 与问题放在同一条消息中发送。",
+  ].join("\n");
+}
 
 function resolveRepoIds(projectId: number, sessionId: string): number[] {
   const session = getFeishuChatSession(sessionId);
@@ -70,14 +123,20 @@ export async function runFeishuAnalysisJob(
 
     let logText = "";
     let attachmentImages: { url: string }[] = [];
+    let focusLogNames: string[] = [];
+    let focusDir: string | null = null;
+    const logHint = extractLogFilenameHint(job.question);
     const hasNewAttachments = Boolean(job.attachments?.length);
+    const expectsLog = questionExpectsLogAnalysis(job.question);
     const shouldPrepareAttachments = hasNewAttachments
-      || Boolean(extractLogFilenameHint(job.question))
-      || feishuSessionHasUploads(job.projectId, job.sessionId);
+      || Boolean(job.parentMessageId)
+      || Boolean(logHint)
+      || feishuSessionHasUploads(job.projectId, job.sessionId)
+      || expectsLog;
 
     if (shouldPrepareAttachments) {
-      if (hasNewAttachments) {
-        if (!job.messageId) {
+      if (hasNewAttachments || job.parentMessageId) {
+        if (hasNewAttachments && !job.messageId) {
           throw new Error("无法下载附件：缺少 message_id。");
         }
         if (useStreamingCard) {
@@ -94,12 +153,27 @@ export async function runFeishuAnalysisJob(
         question: job.question,
         openId: job.openId,
         mode: job.mode,
+        parentMessageId: job.parentMessageId,
+        log: logger,
       });
+      if (expectsLog && !prepared.log_text.trim() && (job.parentMessageId || job.attachments?.length)) {
+        logger.warn({
+          sessionId: job.sessionId,
+          parentMessageId: job.parentMessageId,
+          hasAttachments: Boolean(job.attachments?.length),
+        }, "feishu log analysis had no attachment content after prepare");
+      }
       logText = prepared.log_text;
       attachmentImages = prepared.attachment_images;
+      focusLogNames = prepared.focus_log_names;
+      focusDir = prepared.focus_dir;
     }
 
-    const cursorSessionKey = `feishu:${job.sessionId}`;
+    if (expectsLog && !logText.trim()) {
+      throw new Error(missingLogAttachmentMessage(job));
+    }
+
+    const cursorSessionKey = resolveFeishuAnalysisSessionKey(job.sessionId, logHint, focusLogNames);
 
     const { analysis } = await runAnalysis(
       {
@@ -109,6 +183,7 @@ export async function runFeishuAnalysisJob(
         log_text: logText || undefined,
         attachment_images: attachmentImages.length ? attachmentImages : undefined,
         chat_session_id: cursorSessionKey,
+        feishu_focus_dir: focusDir ?? undefined,
         output_mode: "non_developer",
         user_id: job.appUserId,
         source: "feishu",
@@ -164,6 +239,29 @@ export async function deliverFeishuWebhookResult(
   const chatId = input.chatId?.trim() ?? "";
   if (!chatId) return;
 
+  if (input.result.stageAttachments) {
+    const stage = input.result.stageAttachments;
+    try {
+      const ingested = await ingestFeishuIncomingAttachments({
+        projectId: stage.projectId,
+        sessionId: stage.sessionId,
+        messageId: stage.messageId,
+        attachments: stage.attachments,
+        openId: stage.openId,
+        parentMessageId: stage.parentMessageId,
+        log: logger,
+      });
+      logger.info({
+        sessionId: stage.sessionId,
+        saved: ingested.displayNames,
+      }, "feishu attachments staged");
+    } catch (error) {
+      logger.error({ err: error, sessionId: stage.sessionId }, "feishu attachment staging failed");
+      input.result.replyText = `附件保存失败：${error instanceof Error ? error.message : String(error)}`;
+      input.result.stageAttachments = undefined;
+    }
+  }
+
   if (input.result.replyCard) {
     try {
       await deliverFeishuInteractiveCard({
@@ -212,5 +310,29 @@ export async function deliverFeishuWebhookResult(
     void runFeishuAnalysisJob(logger, job, input.messageId, streamingCard).catch((error) => {
       logger.error({ err: error, sessionId: job.sessionId }, "feishu analysis job crashed");
     });
+  }
+}
+
+export async function deliverFeishuBotMenuResult(
+  logger: FastifyBaseLogger,
+  result: FeishuBotMenuHandleResult,
+): Promise<void> {
+  try {
+    if (result.replyCard) {
+      if (result.chatId) {
+        await sendFeishuInteractiveCardToChat(result.chatId, result.replyCard);
+      } else if (result.openId) {
+        await sendFeishuInteractiveCardToOpenId(result.openId, result.replyCard);
+      }
+    }
+    if (result.replyText?.trim()) {
+      if (result.chatId) {
+        await sendFeishuTextToChat(result.chatId, result.replyText);
+      } else if (result.openId) {
+        await sendFeishuTextToOpenId(result.openId, result.replyText);
+      }
+    }
+  } catch (error) {
+    logger.error({ err: error, openId: result.openId, chatId: result.chatId }, "feishu bot menu reply failed");
   }
 }
